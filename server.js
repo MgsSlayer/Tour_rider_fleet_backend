@@ -21,7 +21,9 @@ const allowedOrigins = (process.env.CORS_ORIGINS || '')
 app.use(cors({
   origin(origin, cb) {
     // same-origin and server-to-server calls arrive without an Origin header
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
     return cb(new Error('Not allowed by CORS'));
   },
 }));
