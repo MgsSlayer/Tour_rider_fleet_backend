@@ -8,7 +8,7 @@ const { chargeDueBalances } = require('./src/services/balanceCron.js');
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-const REQUIRED_ENV = ['DB_CONNECT_STRING', 'JWT_SECRET', 'RESEND_API_KEY'];
+const REQUIRED_ENV = ['DB_CONNECT_STRING', 'JWT_SECRET', 'SMTP_USER', 'SMTP_PASS'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length) {
   console.error(`Missing required env vars: ${missing.join(', ')}. See .env.example`);

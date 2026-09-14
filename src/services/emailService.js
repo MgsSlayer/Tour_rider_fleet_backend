@@ -1,6 +1,20 @@
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// SMTP_HOST set = generic SMTP provider; otherwise fall back to Gmail
+const transporter = nodemailer.createTransport(
+  process.env.SMTP_HOST
+    ? {
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: String(process.env.SMTP_SECURE) === 'true',
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      }
+    : {
+        service: 'gmail',
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      }
+);
+
 const FROM = () => process.env.MAIL_FROM || 'Tour Rider <booking@tour-rider.com>';
 const money = (n) => `$${Number(n).toFixed(2)}`;
 
@@ -22,7 +36,7 @@ const tripRows = (q) => `
 async function sendAdminNewRequest(quote) {
   const to = process.env.ADMIN_EMAIL;
   if (!to) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
-  await resend.emails.send({
+  await transporter.sendMail({
     from: FROM(),
     to: [to],
     subject: `New quote request — ${quote.customer.name}`,
@@ -37,7 +51,7 @@ async function sendAdminNewRequest(quote) {
 }
 
 async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
-  await resend.emails.send({
+  await transporter.sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: 'Your Tour Rider quote is ready',
@@ -58,7 +72,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
 }
 
 async function sendQuoteDeclined(quote) {
-  await resend.emails.send({
+  await transporter.sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: 'About your Tour Rider request',
@@ -75,7 +89,7 @@ async function sendQuoteDeclined(quote) {
 async function sendPaymentReceipt(quote, amount, isDeposit) {
   const to = [quote.customer.email];
   if (process.env.ADMIN_EMAIL) to.push(process.env.ADMIN_EMAIL);
-  await resend.emails.send({
+  await transporter.sendMail({
     from: FROM(),
     to,
     subject: 'Payment received — your ride is confirmed',
@@ -95,7 +109,7 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
 async function sendBalanceCharged(quote) {
   const to = [quote.customer.email];
   if (process.env.ADMIN_EMAIL) to.push(process.env.ADMIN_EMAIL);
-  await resend.emails.send({
+  await transporter.sendMail({
     from: FROM(),
     to,
     subject: 'Your remaining balance has been charged',
