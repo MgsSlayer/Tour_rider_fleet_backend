@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Quote = require('../models/quote.model.js');
 const email = require('../services/emailService.js');
+const { computeQuote } = require('../helpers/pricing.js');
 
 const depositRate = () => {
   const r = Number(process.env.DEPOSIT_RATE);
@@ -28,6 +29,8 @@ const publicView = (q) => ({
   dropoffAddress: q.dropoffAddress,
   passengers: q.passengers,
   tripType: q.tripType,
+  baseFare: q.baseFare,
+  lineItems: (q.lineItems || []).map((l) => ({ label: l.label, amount: l.amount })),
   quotedAmount: q.quotedAmount,
   depositAmount: q.quotedAmount ? Number((q.quotedAmount * depositRate()).toFixed(2)) : null,
   amountPaid: q.amountPaid,
@@ -103,9 +106,14 @@ const getQuote = async (req, res) => {
 
 const acceptQuote = async (req, res) => {
   try {
-    const amount = Number(req.body?.quotedAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Provide a quote amount greater than zero' });
+    // priced here rather than trusting the dashboard — this total is what gets charged
+    let priced;
+    try {
+      priced = req.body?.baseFare !== undefined
+        ? computeQuote({ baseFare: req.body.baseFare, lineItems: req.body.lineItems || [] })
+        : computeQuote({ baseFare: req.body?.quotedAmount, lineItems: [] });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
     }
 
     const quote = await Quote.findById(req.params.id);
@@ -118,7 +126,9 @@ const acceptQuote = async (req, res) => {
     const ttlDays = Number(process.env.QUOTE_LINK_TTL_DAYS) || 7;
 
     quote.status = 'accepted';
-    quote.quotedAmount = Number(amount.toFixed(2));
+    quote.baseFare = priced.baseFare;
+    quote.lineItems = priced.lineItems;
+    quote.quotedAmount = priced.total;
     quote.paymentTokenHash = hashToken(rawToken);
     quote.paymentTokenExpires = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     quote.respondedAt = new Date();
@@ -198,7 +208,22 @@ const getQuoteByToken = async (req, res) => {
   }
 };
 
+// manual recovery when the scheduled charge failed, or to collect early
+const chargeBalance = async (req, res) => {
+  try {
+    const { chargeBalanceFor } = require('../services/balanceCron.js');
+    const result = await chargeBalanceFor(req.params.id);
+    if (!result.ok) {
+      return res.status(result.skipped ? 409 : 502).json({ error: result.error });
+    }
+    return res.json({ success: true, amount: result.amount });
+  } catch (err) {
+    console.error('chargeBalance error:', err);
+    return res.status(500).json({ error: 'Could not charge the balance' });
+  }
+};
+
 module.exports = {
-  createQuote, listQuotes, getQuote, acceptQuote, declineQuote, getQuoteByToken,
+  createQuote, listQuotes, getQuote, acceptQuote, declineQuote, getQuoteByToken, chargeBalance,
   depositRate, hashToken,
 };

@@ -1,5 +1,15 @@
 const mongoose = require('mongoose');
 
+// one priced row of the quote breakdown — tolls, gratuity, VAT, or anything custom
+const lineItemSchema = new mongoose.Schema({
+  id: { type: String, required: true },
+  label: { type: String, required: true },
+  mode: { type: String, enum: ['amount', 'percent'], default: 'amount' },
+  value: { type: Number, required: true },
+  basis: [String],
+  amount: { type: Number, required: true },
+}, { _id: false });
+
 // declared as its own schema so the `type` field isn't read as a type declaration
 const vehicleSchema = new mongoose.Schema({
   sn: { type: String, required: true },
@@ -36,6 +46,8 @@ const quoteSchema = new mongoose.Schema({
     index: true,
   },
 
+  baseFare: Number,
+  lineItems: [lineItemSchema],
   quotedAmount: Number,
   declineReason: String,
   respondedAt: Date,
@@ -54,6 +66,7 @@ const quoteSchema = new mongoose.Schema({
   remainingBalance: { type: Number, default: 0 },
   remainingBalancePaid: { type: Boolean, default: false },
   remainingBalancePaymentId: String,
+  balanceChargeStartedAt: Date,
 }, { timestamps: true });
 
 module.exports = mongoose.model('Quote', quoteSchema);

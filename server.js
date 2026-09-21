@@ -15,19 +15,28 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Render terminates TLS at its proxy — needed for real client IPs in rate limiting
+app.set('trust proxy', 1);
+
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
-app.use(cors({
-  origin(origin, cb) {
-    // same-origin and server-to-server calls arrive without an Origin header
-    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      return cb(null, true);
-    }
-    return cb(new Error('Not allowed by CORS'));
-  },
+// The backend also serves the frontend, so most calls are same-origin — and
+// browsers still send an Origin header on those. Always allow the request's own
+// origin, then whatever CORS_ORIGINS adds on top.
+app.use(cors((req, cb) => {
+  const origin = req.header('Origin');
+  const selfOrigin = `${req.protocol}://${req.get('host')}`;
+  const allowed = !origin
+    || origin === selfOrigin
+    || allowedOrigins.includes('*')
+    || allowedOrigins.includes(origin);
+  cb(allowed ? null : new Error('Not allowed by CORS'), { origin: allowed });
 }));
 app.use(express.json({ limit: '100kb' }));
+
+// serves the static frontend so a single origin (and one tunnel) covers the whole app
+app.use(express.static(require('path').join(__dirname, '../frontend')));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
