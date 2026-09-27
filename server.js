@@ -43,6 +43,9 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/auth', require('./src/routes/api/auth.route.js'));
 app.use('/api/quotes', require('./src/routes/api/quotes.route.js'));
 app.use('/api/square', require('./src/routes/api/payment.route.js'));
+app.use('/api/bases', require('./src/routes/api/bases.route.js'));
+app.use('/api/paypal', require('./src/routes/api/paypal.route.js'));
+app.use('/api/offline', require('./src/routes/api/offline.route.js'));
 
 app.use((err, req, res, next) => {
   if (err?.message === 'Not allowed by CORS') {

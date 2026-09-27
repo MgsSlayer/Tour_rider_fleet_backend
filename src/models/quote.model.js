@@ -34,6 +34,13 @@ const quoteSchema = new mongoose.Schema({
   pickupAddress: { type: String, required: true },
   stopoverAddress: String,
   dropoffAddress: { type: String, required: true },
+
+  // captured from the customer's autocomplete pick, so the admin map needs no geocoding
+  coords: {
+    pickup: { lat: Number, lng: Number },
+    stopover: { lat: Number, lng: Number },
+    dropoff: { lat: Number, lng: Number },
+  },
   message: String,
 
   // resolved pickup instant, used by the balance cron
@@ -41,9 +48,17 @@ const quoteSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['pending', 'accepted', 'declined', 'paid'],
+    enum: ['pending', 'accepted', 'declined', 'awaiting_payment', 'paid'],
     default: 'pending',
     index: true,
+  },
+
+  // cached price suggestion — computed once per quote so opening the dashboard
+  // doesn't re-bill Google's Routes API on every page load
+  suggestion: {
+    computedAt: Date,
+    baseId: String,
+    payload: mongoose.Schema.Types.Mixed,
   },
 
   baseFare: Number,
@@ -54,6 +69,16 @@ const quoteSchema = new mongoose.Schema({
   respondedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
   paymentOption: { type: String, enum: ['deposit', 'full'] },
+  // only 'card' can be kept on file; the rest leave the balance to be collected by link
+  paymentMethod: {
+    type: String,
+    enum: ['card', 'apple_pay', 'google_pay', 'cash_app', 'paypal', 'venmo', 'zelle', 'cash'],
+  },
+  // surcharge for the method the customer picked, charged on top of the quote
+  processingFeeRate: Number,
+  processingFee: { type: Number, default: 0 },
+  // proof of acceptance at the moment of payment, not merely a ticked box
+  termsAcceptedAt: Date,
   amountPaid: { type: Number, default: 0 },
   paymentId: String,
 
@@ -66,7 +91,21 @@ const quoteSchema = new mongoose.Schema({
   remainingBalance: { type: Number, default: 0 },
   remainingBalancePaid: { type: Boolean, default: false },
   remainingBalancePaymentId: String,
+  balanceMethod: String,
+  balanceFeeRate: Number,
+  balanceProcessingFee: { type: Number, default: 0 },
   balanceChargeStartedAt: Date,
+  // stops the pickup-day balance link being mailed more than once
+  balanceLinkSentAt: Date,
+
+  // PayPal and Venmo settle through the Orders API rather than Square
+  paypalOrderId: { type: String, index: true },
+  paypalCaptureId: String,
+
+  // Zelle and cash settle outside the app; the admin confirms the money landed
+  offlineChosenAt: Date,
+  offlineConfirmedAt: Date,
+  offlineConfirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Quote', quoteSchema);

@@ -1,4 +1,6 @@
 const nodemailer = require('nodemailer');
+const { buildItineraryPDF, buildInvoicePDF, buildCalendarInvite } = require('./itinerary.js');
+const { methodLabel } = require('../helpers/paymentMethods.js');
 
 // SMTP_HOST set = generic SMTP provider; otherwise fall back to Gmail
 // many hosts block outbound SMTP ports — fail fast rather than hanging a request
@@ -24,6 +26,12 @@ const transporter = nodemailer.createTransport(
 transporter.verify()
   .then(() => console.log('smtp ready'))
   .catch((e) => console.error(`SMTP UNAVAILABLE: ${e.message} — emails will fail`));
+
+// methodLabel reads naturally mid-sentence; a table cell wants it capitalised
+const methodName = (m) => {
+  const label = methodLabel(m);
+  return label.charAt(0).toUpperCase() + label.slice(1);
+};
 
 const FROM = () => process.env.MAIL_FROM || 'Tour Rider <booking@tour-rider.com>';
 const money = (n) => `$${Number(n).toFixed(2)}`;
@@ -272,20 +280,42 @@ async function sendQuoteDeclined(quote) {
   });
 }
 
+// Builds an attachment, never letting a failure sink the email itself.
+async function attach(label, filename, contentType, build) {
+  try {
+    return { filename, content: await build(), contentType };
+  } catch (e) {
+    console.error(`${label} failed:`, e.message);
+    return null;
+  }
+}
+
+/** Customer copy: the invoice, with pricing. Never the itinerary. */
+// only a stored card can be charged again; every other method needs a link
+function balanceLine(quote, isDeposit) {
+  if (!isDeposit) return 'Your trip is paid in full. Nothing further is due.';
+  const due = money(quote.remainingBalance);
+  return quote.squareCardId
+    ? `The remaining <strong>${due}</strong> will be charged automatically to the same card on the morning of your trip. Nothing more to do.`
+    : `We'll email you a payment link for the remaining <strong>${due}</strong> on the morning of your trip.`;
+}
+
 async function sendPaymentReceipt(quote, amount, isDeposit) {
-  // admins are bcc'd so their addresses never appear in the customer's copy
+  const attachments = (await Promise.all([
+    attach('invoice PDF', `invoice-${quote._id}.pdf`, 'application/pdf',
+      () => buildInvoicePDF(quote, amount, isDeposit)),
+    attach('calendar invite', 'booking.ics', 'text/calendar; charset=utf-8; method=PUBLISH',
+      async () => buildCalendarInvite(quote)),
+  ])).filter(Boolean);
+
   await transporter.sendMail({
     from: FROM(),
     to: [quote.customer.email],
-    bcc: adminRecipients(),
-    subject: 'Payment received — your ride is confirmed',
-    text: `Hello ${quote.customer.name},\n\nWe've received ${money(amount)} and your ride is confirmed.\n`
-      + (isDeposit ? `The remaining ${money(quote.remainingBalance)} will be charged on the day of pickup.\n` : 'Your trip is paid in full.\n')
-      + `\nReference: ${quote._id}`,
+    attachments,
     html: shell({
       heading: 'Payment received',
       accent: BRAND.good,
-      preheader: `${money(amount)} received — your ride is confirmed`,
+      preheader: `${money(amount)} received, your ride is confirmed`,
       body:
         para(`Hello ${esc(quote.customer.name)},`)
         + para("We've received your payment and your ride is confirmed.")
@@ -298,13 +328,60 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
         + detailRows([
           ...tripRows(quote),
           ['Total', money(quote.quotedAmount)],
+          quote.paymentMethod ? ['Paid with', methodName(quote.paymentMethod)] : null,
           isDeposit ? ['Balance remaining', money(quote.remainingBalance)] : null,
           ['Reference', String(quote._id)],
         ])
-        + para(isDeposit
-          ? `The remaining <strong>${money(quote.remainingBalance)}</strong> will be charged automatically to the same card on the morning of your trip — nothing more to do.`
-          : 'Your trip is paid in full. Nothing further is due.')
+        + para(balanceLine(quote, isDeposit))
         + para(`<span style="font-size:13px;color:${BRAND.muted};">We'll be in touch before pickup with your driver's details.</span>`),
+    }),
+  });
+
+  // the admin copy carries the pricing-free itinerary as well, so it can be
+  // handed to a driver without exposing what the customer paid
+  await sendAdminBookingConfirmed(quote, amount, isDeposit);
+}
+
+/** Admin copy: itinerary for the driver, invoice for the records. */
+async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
+  const to = adminRecipients();
+  if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping booking notification');
+
+  const attachments = (await Promise.all([
+    attach('itinerary PDF', `itinerary-${quote._id}.pdf`, 'application/pdf',
+      () => buildItineraryPDF(quote)),
+    attach('invoice PDF', `invoice-${quote._id}.pdf`, 'application/pdf',
+      () => buildInvoicePDF(quote, amount, isDeposit)),
+    attach('calendar invite', 'booking.ics', 'text/calendar; charset=utf-8; method=PUBLISH',
+      async () => buildCalendarInvite(quote)),
+  ])).filter(Boolean);
+
+  const c = quote.customer;
+  await transporter.sendMail({
+    from: FROM(),
+    to,
+    attachments,
+    subject: `Booking confirmed — ${c.name}`,
+    text: `${c.name} has paid ${money(amount)}${isDeposit ? ` (deposit, ${money(quote.remainingBalance)} due on pickup day)` : ' in full'}.\n`
+      + `Contact: ${c.phone ? `${c.phone} / ` : ''}${c.email}\n`
+      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Attached: Itinerary with no pricing, customer's invoice and a calendar invite.`,
+    html: shell({
+      heading: 'Booking confirmed',
+      accent: BRAND.good,
+      preheader: `${c.name} paid ${money(amount)}`,
+      body:
+        para(`<strong>${esc(c.name)}</strong> has paid and the trip is confirmed.`)
+        + amountPanel(isDeposit ? 'Deposit received' : 'Paid in full', money(amount),
+          isDeposit ? `${money(quote.remainingBalance)} due on the day of pickup` : 'Nothing further is due')
+        + invoiceTable(quote)
+        + detailRows([
+          ['Customer', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ...tripRows(quote),
+          ['Reference', String(quote._id)],
+        ])
+        + para('<span style="font-size:13px;color:' + BRAND.muted + '">Attached: Itinerary with no pricing, customer\'s invoice and a calendar invite.</span>'),
     }),
   });
 }
@@ -380,11 +457,145 @@ async function sendBalanceChargeFailed(quote, reason) {
   });
 }
 
+// A deposit taken with a wallet or PayPal leaves no card to charge, so the
+// balance is asked for by link on the morning of the trip instead.
+async function sendBalanceLink(quote, paymentUrl) {
+  const c = quote.customer;
+  const due = money(quote.remainingBalance);
+  await transporter.sendMail({
+    from: FROM(),
+    to: [c.email],
+    subject: `Balance due today for your Tour Rider trip — ${due}`,
+    text: `Hello ${c.name},\n\nYour trip is today and the remaining balance of ${due} is now due.\n\n`
+      + `Pay the balance: ${paymentUrl}\n\n`
+      + `Paying before pickup keeps things simple for you and your driver.`,
+    html: shell({
+      heading: 'Your balance is due today',
+      preheader: `${due} to settle before your pickup`,
+      body:
+        para(`Hello ${esc(c.name)},`)
+        + para('Your trip is today. Because your deposit was paid with a method we cannot charge again, the balance needs settling with this link.')
+        + amountPanel('Balance due', due, `Already paid ${money(quote.amountPaid)}`)
+        + detailRows(tripRows(quote))
+        + button(paymentUrl, 'Pay the balance')
+        + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
+    }),
+  });
+}
+
+// the admin needs to know a balance is riding on the customer clicking a link
+async function sendAdminBalanceLinkSent(quote) {
+  const to = adminRecipients();
+  if (!to.length) return;
+
+  const c = quote.customer;
+  await transporter.sendMail({
+    from: FROM(),
+    to,
+    subject: `Balance link sent to ${c.name} — ${money(quote.remainingBalance)} outstanding`,
+    text: `${c.name} paid their deposit by ${quote.paymentMethod || 'an uncharged method'}, so there is no card on file.\n`
+      + `A payment link for ${money(quote.remainingBalance)} has been emailed to ${c.email}.\n`
+      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Reference: ${quote._id}\n\n`
+      + `Check it has been paid before the vehicle leaves.`,
+    html: shell({
+      heading: 'Balance link sent',
+      accent: BRAND.accent,
+      preheader: `${money(quote.remainingBalance)} still to collect from ${c.name}`,
+      body:
+        para(`<strong>${esc(c.name)}</strong> paid the deposit by ${esc(quote.paymentMethod || 'a method that cannot be charged again')}, so no card is held on file.`)
+        + amountPanel('Outstanding', money(quote.remainingBalance), 'Payment link emailed to the customer')
+        + detailRows([
+          ['Customer', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ...tripRows(quote),
+          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
+          ['Already paid', money(quote.amountPaid)],
+          ['Reference', String(quote._id)],
+        ])
+        + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : '')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">Confirm payment before the vehicle leaves the base.</span>`),
+    }),
+  });
+}
+
+// Zelle and cash settle outside the app, so the customer needs telling how
+async function sendOfflineInstructions(quote, amount, method, isDeposit) {
+  const { instructionsFor } = require('../controllers/offline.controller.js');
+  const how = instructionsFor(method);
+  const label = method === 'zelle' ? 'Zelle' : 'cash';
+  const c = quote.customer;
+
+  await transporter.sendMail({
+    from: FROM(),
+    to: [c.email],
+    subject: `How to pay for your Tour Rider booking — ${money(amount)} by ${label}`,
+    text: `Hello ${c.name},\n\nYour booking is held for you. ${money(amount)} is due by ${label}.\n\n${how}\n\n`
+      + `There is no processing fee on ${label}.\n`
+      + (isDeposit ? `The remaining ${money(quote.remainingBalance)} is due on the day of pickup.\n` : ''),
+    html: shell({
+      heading: `Pay by ${esc(label)}`,
+      preheader: `${money(amount)} due by ${esc(label)} to confirm your booking`,
+      body:
+        para(`Hello ${esc(c.name)},`)
+        + para('Your booking is held for you. Here is what is due and how to send it.')
+        + amountPanel(isDeposit ? 'Deposit due' : 'Amount due', money(amount), `No processing fee on ${esc(label)}`)
+        + para(`<strong>${esc(how)}</strong>`)
+        + detailRows(tripRows(quote))
+        + (isDeposit
+          ? para(`The remaining <strong>${money(quote.remainingBalance)}</strong> is due on the day of pickup.`)
+          : '')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">We'll confirm by email as soon as the payment reaches us.</span>`),
+    }),
+  });
+}
+
+// the admin has to watch for money the app cannot see arrive
+async function sendAdminOfflineChosen(quote, amount, method) {
+  const to = adminRecipients();
+  if (!to.length) return;
+
+  const c = quote.customer;
+  const label = method === 'zelle' ? 'Zelle' : 'cash';
+  await transporter.sendMail({
+    from: FROM(),
+    to,
+    subject: `${c.name} will pay ${money(amount)} by ${label}`,
+    text: `${c.name} chose to pay by ${label}.\n`
+      + `Expecting ${money(amount)}.\n`
+      + `Customer: ${c.email}${c.phone ? ` / ${c.phone}` : ''}\n`
+      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Reference: ${quote._id}\n\n`
+      + `Nothing has been charged. Mark it paid on the dashboard once the money lands.`,
+    html: shell({
+      heading: `Paying by ${esc(label)}`,
+      accent: BRAND.accent,
+      preheader: `${money(amount)} expected from ${esc(c.name)}`,
+      body:
+        para(`<strong>${esc(c.name)}</strong> chose to pay by ${esc(label)}. Nothing has been charged.`)
+        + amountPanel('Expected', money(amount), 'Confirm on the dashboard once it arrives')
+        + detailRows([
+          ['Customer', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ...tripRows(quote),
+          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
+          ['Reference', String(quote._id)],
+        ])
+        + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : ''),
+    }),
+  });
+}
+
 module.exports = {
   sendAdminNewRequest,
+  sendAdminBookingConfirmed,
   sendBalanceChargeFailed,
   sendQuoteAccepted,
   sendQuoteDeclined,
   sendPaymentReceipt,
   sendBalanceCharged,
+  sendBalanceLink,
+  sendAdminBalanceLinkSent,
+  sendOfflineInstructions,
+  sendAdminOfflineChosen,
 };

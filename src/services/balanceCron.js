@@ -2,6 +2,8 @@ const client = require('../config/square.js');
 const Quote = require('../models/quote.model.js');
 const email = require('../services/emailService.js');
 const { createPaymentViaRest } = require('../controllers/payment.controller.js');
+const { zonedDayRange } = require('../helpers/datetime.js');
+const { newToken, hashToken, tokenTtlDays } = require('../helpers/tokens.js');
 
 // Stable per-quote key: Square returns the original payment instead of charging
 // again, so a double-click or a repeated call cannot take the money twice.
@@ -45,6 +47,21 @@ async function chargeBalanceFor(quoteId) {
   );
 
   if (!quote) {
+    // a wallet or PayPal deposit leaves a real balance with no card behind it
+    const owed = await Quote.findOne({
+      _id: quoteId,
+      remainingBalancePaid: { $ne: true },
+      remainingBalance: { $gt: 0 },
+      $or: [{ squareCardId: { $exists: false } }, { squareCardId: null }],
+    }).select('paymentMethod');
+
+    if (owed) {
+      return {
+        ok: false,
+        skipped: true,
+        error: 'This deposit was paid by a method that cannot be charged again. Send the customer a balance link instead.',
+      };
+    }
     return { ok: false, error: 'No outstanding balance to charge for this booking.', skipped: true };
   }
 
@@ -111,14 +128,65 @@ async function chargeBalanceFor(quoteId) {
   return { ok: true, amount, paymentId: payment?.id || null };
 }
 
+/**
+ * Mails a fresh payment link for one balance that has no card behind it.
+ * The link is minted here because the original was burned by the deposit.
+ */
+async function sendBalanceLinkFor(quoteId) {
+  const rawToken = newToken();
+
+  // claiming via the filter keeps a re-run from mailing the customer twice
+  const quote = await Quote.findOneAndUpdate(
+    {
+      _id: quoteId,
+      status: 'paid',
+      paymentOption: 'deposit',
+      remainingBalancePaid: { $ne: true },
+      remainingBalance: { $gt: 0 },
+      $or: [{ balanceLinkSentAt: null }, { balanceLinkSentAt: { $exists: false } }],
+    },
+    {
+      $set: {
+        balanceLinkSentAt: new Date(),
+        paymentTokenHash: hashToken(rawToken),
+        paymentTokenExpires: new Date(Date.now() + tokenTtlDays() * 24 * 60 * 60 * 1000),
+      },
+    },
+    { new: true }
+  );
+
+  if (!quote) return { ok: false, skipped: true };
+
+  const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+  if (!base) {
+    console.error(`PUBLIC_URL not set; cannot mail a balance link for ${quote._id}`);
+    return { ok: false, error: 'PUBLIC_URL not set' };
+  }
+  const paymentUrl = `${base}/payment.html?token=${rawToken}`;
+
+  try {
+    await email.sendBalanceLink(quote, paymentUrl);
+  } catch (err) {
+    // let it be retried tomorrow rather than leaving the balance silently unasked for
+    await Quote.updateOne({ _id: quote._id }, { $unset: { balanceLinkSentAt: '' } });
+    console.error(`balance link email failed for ${quote._id}:`, err.message);
+    return { ok: false, error: err.message };
+  }
+
+  email.sendAdminBalanceLinkSent(quote)
+    .catch((e) => console.error('admin balance-link notice failed:', e.message));
+
+  console.log(`mailed balance link for quote ${quote._id}`);
+  return { ok: true, amount: Number(quote.remainingBalance) };
+}
+
 // charges outstanding balances on saved cards for rides picking up today
 async function chargeDueBalances() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  // "today" means today where the fleet operates, not where the server runs
+  const { start, end } = zonedDayRange();
 
   const due = await Quote.find({
-    pickupDateTime: { $gte: today, $lt: tomorrow },
+    pickupDateTime: { $gte: start, $lt: end },
     status: 'paid',
     paymentOption: 'deposit',
     remainingBalancePaid: { $ne: true },
@@ -131,7 +199,25 @@ async function chargeDueBalances() {
     const result = await chargeBalanceFor(_id);
     if (result.ok) charged += 1;
   }
-  return { due: due.length, charged };
+
+  // deposits taken by wallet or PayPal left no card, so those are asked for by link
+  const byLink = await Quote.find({
+    pickupDateTime: { $gte: start, $lt: end },
+    status: 'paid',
+    paymentOption: 'deposit',
+    remainingBalancePaid: { $ne: true },
+    remainingBalance: { $gt: 0 },
+    $or: [{ squareCardId: { $exists: false } }, { squareCardId: null }],
+    $and: [{ $or: [{ balanceLinkSentAt: null }, { balanceLinkSentAt: { $exists: false } }] }],
+  }).select('_id');
+
+  let linked = 0;
+  for (const { _id } of byLink) {
+    const result = await sendBalanceLinkFor(_id);
+    if (result.ok) linked += 1;
+  }
+
+  return { due: due.length, charged, linkable: byLink.length, linked };
 }
 
-module.exports = { chargeDueBalances, chargeBalanceFor, balanceIdempotencyKey };
+module.exports = { chargeDueBalances, chargeBalanceFor, sendBalanceLinkFor, balanceIdempotencyKey };

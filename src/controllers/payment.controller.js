@@ -1,12 +1,17 @@
-const crypto = require('crypto');
 const axios = require('axios');
 const client = require('../config/square.js');
-const Quote = require('../models/quote.model.js');
-const email = require('../services/emailService.js');
-const { depositRate, hashToken } = require('./quotes.controller.js');
+const v = require('../helpers/validate.js');
+const { newIdempotencyKey } = require('../helpers/tokens.js');
+const { SQUARE_METHODS, canStoreCard } = require('../helpers/paymentMethods.js');
+const { resolvePayable, applyPayment } = require('../services/payments.js');
 
-const newIdempotencyKey = () =>
-  crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+// Square only accepts E.164, and the quote form takes whatever the customer types
+function squarePhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  const e164 = digits.length === 10 ? `+1${digits}`
+    : (digits.length === 11 && digits.startsWith('1') ? `+${digits}` : null);
+  return e164 || undefined;
+}
 
 async function getOrCreateSquareCustomer({ name, email: mail, phone }) {
   const searchRes = await client.customers.search({
@@ -15,12 +20,22 @@ async function getOrCreateSquareCustomer({ name, email: mail, phone }) {
   const found = searchRes?.result?.customers || searchRes?.customers;
   if (found && found.length) return found[0].id;
 
-  const createRes = await client.customers.create({
+  const create = (phoneNumber) => client.customers.create({
     givenName: name,
     emailAddress: mail,
-    phoneNumber: phone || undefined,
+    phoneNumber,
   });
-  return (createRes.result?.customer || createRes.customer).id;
+
+  try {
+    const createRes = await create(squarePhone(phone));
+    return (createRes.result?.customer || createRes.customer).id;
+  } catch (err) {
+    // a phone number Square dislikes is not worth losing the payment over
+    const text = JSON.stringify(err?.body || err?.errors || err?.message || '');
+    if (!/phone/i.test(text)) throw err;
+    const retry = await create(undefined);
+    return (retry.result?.customer || retry.customer).id;
+  }
 }
 
 // used when the SDK call fails; same request against the Connect REST API
@@ -58,37 +73,37 @@ const getSquareConfig = (req, res) => {
 
 const payQuote = async (req, res) => {
   try {
-    const { token, sourceId, paymentOption } = req.body || {};
-    if (!token) return res.status(400).json({ success: false, error: 'Missing token' });
-    if (!sourceId) return res.status(400).json({ success: false, error: 'Missing card details' });
-    if (!['deposit', 'full'].includes(paymentOption)) {
-      return res.status(400).json({ success: false, error: 'Choose deposit or full payment' });
+    let token; let sourceId; let paymentOption; let method;
+    try {
+      token = v.text(req.body?.token, 'Payment link', { max: 128 });
+      sourceId = v.text(req.body?.sourceId, 'Payment details', { max: 1024 });
+      paymentOption = v.oneOf(req.body?.paymentOption, 'Payment option', ['deposit', 'full']);
+      method = v.oneOf(req.body?.method ?? 'card', 'Payment method', SQUARE_METHODS);
+      // enforced here too: the checkbox alone can be bypassed by calling the API
+      if (req.body?.acceptedTerms !== true) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please accept the terms and conditions before paying.',
+        });
+      }
+    } catch (err) {
+      return res.status(400).json({ success: false, error: err.message });
     }
 
-    const quote = await Quote.findOne({ paymentTokenHash: hashToken(String(token)) });
-    if (!quote) return res.status(404).json({ success: false, error: 'This link is not valid' });
-    if (quote.paymentTokenExpires && quote.paymentTokenExpires < new Date()) {
-      return res.status(410).json({ success: false, error: 'This link has expired' });
+    const payable = await resolvePayable(token, paymentOption, method);
+    if (payable.error) {
+      return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    if (quote.status === 'paid') {
-      return res.status(409).json({ success: false, error: 'This booking has already been paid' });
-    }
-    if (quote.status !== 'accepted') {
-      return res.status(409).json({ success: false, error: 'This request is not open for payment' });
-    }
-
-    // the charge is always derived from the stored quote, never from the client
-    const total = Number(quote.quotedAmount);
-    const isDeposit = paymentOption === 'deposit';
-    const amount = isDeposit ? Number((total * depositRate()).toFixed(2)) : total;
-    const remaining = isDeposit ? Number((total - amount).toFixed(2)) : 0;
+    const { quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit } = payable;
 
     const idempotencyKey = newIdempotencyKey();
     let customerId = null;
     let cardId = null;
 
-    // a deposit needs the card kept on file so the balance can be taken on pickup day
-    if (isDeposit) {
+    // keeping the card is the customer's choice, and only a real card can be kept;
+    // without one the balance is asked for by link instead of charged
+    const wantsCardStored = req.body?.saveCard === true;
+    if (mode === 'initial' && isDeposit && canStoreCard(method) && wantsCardStored) {
       try {
         customerId = await getOrCreateSquareCustomer(quote.customer);
         const cardRes = await client.cards.create({
@@ -98,8 +113,9 @@ const payQuote = async (req, res) => {
         });
         cardId = (cardRes.result?.card || cardRes.card).id;
       } catch (err) {
-        console.error('Square save card error:', err);
-        return res.status(500).json({ success: false, error: 'Could not save your card for the balance payment.' });
+        // the payment matters more than the convenience; fall back to a link
+        console.error('Square save card error, continuing without it:', err?.message || err);
+        customerId = null;
       }
     }
 
@@ -133,23 +149,11 @@ const payQuote = async (req, res) => {
       }
     }
 
-    quote.status = 'paid';
-    quote.paymentOption = paymentOption;
-    quote.amountPaid = amount;
-    quote.paymentId = payment?.id || null;
-    quote.remainingBalance = remaining;
-    quote.remainingBalancePaid = !isDeposit;
-    quote.squareCustomerId = customerId;
-    quote.squareCardId = cardId;
-    // the link is single-use
-    quote.paymentTokenHash = undefined;
-    quote.paymentTokenExpires = undefined;
-    await quote.save();
-
-    email.sendPaymentReceipt(quote, amount, isDeposit)
-      .catch((e) => console.error('receipt email failed:', e.message));
-
-    return res.json({ success: true, amountPaid: amount, remainingBalance: remaining });
+    const result = await applyPayment(quote, {
+      mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit,
+      paymentId: payment?.id || null, customerId, cardId,
+    });
+    return res.json(result);
   } catch (err) {
     console.error('payQuote error:', err);
     return res.status(500).json({ success: false, error: 'Payment failed' });

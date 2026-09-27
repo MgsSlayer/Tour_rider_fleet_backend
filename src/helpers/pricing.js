@@ -2,6 +2,8 @@
 // maths, but only what this returns is ever stored or charged.
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+// rates like 8.875% must survive storage intact, so percentages keep 3 decimals
+const round3 = (n) => Math.round((Number(n) + Number.EPSILON) * 1000) / 1000;
 
 const MAX_LINES = 12;
 
@@ -60,7 +62,7 @@ function computeQuote({ baseFare, lineItems = [] }) {
     }
 
     priorAmounts.set(id, amount);
-    computed.push({ id, label, mode, value: round2(value), basis, amount });
+    computed.push({ id, label, mode, value: mode === 'percent' ? round3(value) : round2(value), basis, amount });
   });
 
   const total = round2(base + computed.reduce((sum, l) => sum + l.amount, 0));

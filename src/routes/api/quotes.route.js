@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const {
-  createQuote, listQuotes, getQuote, acceptQuote, declineQuote, getQuoteByToken, chargeBalance,
+  createQuote, listQuotes, getQuote, acceptQuote, declineQuote, getQuoteByToken, chargeBalance, suggestQuote, suggestBaseFor,
 } = require('../../controllers/quotes.controller.js');
+const { confirmOffline } = require('../../controllers/offline.controller.js');
 const { quoteLimiter } = require('../../middleware/rate.limiter.js');
 const { verifyJWT, checkRole } = require('../../middleware/auth.middleware.js');
 
@@ -18,5 +19,8 @@ router.get('/:id', ...adminOnly, getQuote);
 router.patch('/:id/accept', ...adminOnly, acceptQuote);
 router.patch('/:id/decline', ...adminOnly, declineQuote);
 router.patch('/:id/charge-balance', ...adminOnly, chargeBalance);
+router.patch('/:id/confirm-offline', ...adminOnly, confirmOffline);
+router.get('/:id/bases-for', ...adminOnly, suggestBaseFor);
+router.post('/:id/suggest', ...adminOnly, suggestQuote);
 
 module.exports = router;
