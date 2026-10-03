@@ -16,11 +16,31 @@ const vehicleSchema = new mongoose.Schema({
   name: { type: String },
   type: { type: String },
   capacity: { type: String },
+  pic: { type: String },
+}, { _id: false });
+
+// one fleet vehicle that fits an open request, priced for that trip
+const matchSchema = new mongoose.Schema({
+  sn: { type: String, required: true },
+  name: String,
+  type: String,
+  capacity: String,
+  pic: String,
+  rates: { retail: Number, affiliate: Number },
+  // same shape as a dashboard suggestion: retail first, then affiliate
+  candidates: mongoose.Schema.Types.Mixed,
 }, { _id: false });
 
 const quoteSchema = new mongoose.Schema({
+  // an 'open' request arrives without a vehicle; the admin picks one before pricing it
+  kind: { type: String, enum: ['vehicle', 'open'], default: 'vehicle' },
   // snapshot of the vehicle chosen on the fleet page, keyed by the sheet S/N
-  vehicle: { type: vehicleSchema, required: true },
+  vehicle: { type: vehicleSchema, required() { return this.kind !== 'open'; } },
+  // what an open request asked for in place of a vehicle
+  wants: {
+    category: String,
+    city: String,
+  },
   customer: {
     name: { type: String, required: true },
     email: { type: String, required: true, lowercase: true, trim: true },
@@ -59,6 +79,17 @@ const quoteSchema = new mongoose.Schema({
     computedAt: Date,
     baseId: String,
     payload: mongoose.Schema.Types.Mixed,
+  },
+
+  // fleet vehicles that fit an open request, all priced from one route lookup
+  matching: {
+    computedAt: Date,
+    baseId: String,
+    // why the list is empty or unpriced, shown to the admin as-is
+    error: String,
+    route: mongoose.Schema.Types.Mixed,
+    repositioning: mongoose.Schema.Types.Mixed,
+    vehicles: { type: [matchSchema], default: undefined },
   },
 
   baseFare: Number,

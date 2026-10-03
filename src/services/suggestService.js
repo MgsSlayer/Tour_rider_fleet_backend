@@ -3,6 +3,7 @@
 // ignores them, and acceptQuote re-prices whatever they actually submit.
 
 const { tripMinutes } = require('../helpers/datetime.js');
+const { computeQuote } = require('../helpers/pricing.js');
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const round3 = (n) => Math.round((Number(n) + Number.EPSILON) * 1000) / 1000;
@@ -150,10 +151,10 @@ function candidate(label, hourlyRate, { hours, tolls, repositioning }) {
 }
 
 /**
- * Suggests pricing for a quote. `rates` carries the vehicle's sheet prices,
- * which only the browser can read — the backend never touches the Sheet.
+ * Route, repositioning and billable hours for a trip. These are the same
+ * whichever vehicle runs it — only the hourly rate differs.
  */
-async function suggestPricing(quote, rates = {}, bases = [], chosenBaseId = null) {
+async function tripContext(quote, bases = [], chosenBaseId = null) {
   if (!key()) {
     const err = new Error('Price suggestions are unavailable. GOOGLE_MAPS_API_KEY is not set.');
     err.code = 'NO_MAPS_KEY';
@@ -166,18 +167,9 @@ async function suggestPricing(quote, rates = {}, bases = [], chosenBaseId = null
   const chosen = chosenBaseId && bases.find((b) => String(b._id) === String(chosenBaseId));
   const near = await nearestBase(quote.pickupAddress, chosen ? [chosen] : bases);
   const hours = billableHours(quote, facts.driveMinutes);
-  const ctx = { hours, tolls: facts.tolls, repositioning: near.fee };
-
-  const candidates = [
-    candidate('Retail', rates.retail, ctx),
-    candidate('Affiliate', rates.affiliate, ctx),
-  ].filter(Boolean);
-
-  if (!candidates.length) {
-    throw new Error('This vehicle has no Aff. or Ret. price set in the sheet.');
-  }
 
   return {
+    ctx: { hours, tolls: facts.tolls, repositioning: near.fee },
     route: { ...facts, hours },
     repositioning: {
       fee: near.fee,
@@ -201,8 +193,43 @@ async function suggestPricing(quote, rates = {}, bases = [], chosenBaseId = null
             + 'so the customer sees one base fare rather than a separate charge.'
           : `Pickup is ${near.miles} mi from ${near.base.label}. No repositioning fee applied.`,
     },
-    candidates,
   };
 }
 
-module.exports = { suggestPricing, billableHours, candidate, routeFacts, nearestBase, formatDuration };
+const priceRates = (rates = {}, ctx) => [
+  candidate('Retail', rates.retail, ctx),
+  candidate('Affiliate', rates.affiliate, ctx),
+].filter(Boolean);
+
+/**
+ * Suggests pricing for a quote. `rates` carries the vehicle's sheet prices,
+ * which the dashboard reads and passes in.
+ */
+async function suggestPricing(quote, rates = {}, bases = [], chosenBaseId = null) {
+  const { ctx, route, repositioning } = await tripContext(quote, bases, chosenBaseId);
+  const candidates = priceRates(rates, ctx);
+
+  if (!candidates.length) {
+    throw new Error('This vehicle has no Aff. or Ret. price set in the sheet.');
+  }
+
+  return { route, repositioning, candidates };
+}
+
+/** Prices every vehicle that fits an open request from a single route lookup. */
+async function priceVehicles(quote, vehicles, bases = [], chosenBaseId = null) {
+  const { ctx, route, repositioning } = await tripContext(quote, bases, chosenBaseId);
+  return {
+    route,
+    repositioning,
+    vehicles: vehicles.map((v) => ({
+      ...v,
+      // totals ride along so the admin email can list prices without re-pricing
+      candidates: priceRates(v.rates, ctx).map((c) => ({ ...c, total: computeQuote(c).total })),
+    })),
+  };
+}
+
+module.exports = {
+  suggestPricing, priceVehicles, billableHours, candidate, routeFacts, nearestBase, formatDuration,
+};

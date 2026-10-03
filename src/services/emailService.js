@@ -1,6 +1,10 @@
 const nodemailer = require('nodemailer');
 const { buildItineraryPDF, buildInvoicePDF, buildCalendarInvite } = require('./itinerary.js');
-const { methodLabel } = require('../helpers/paymentMethods.js');
+const {
+  methodLabel, processingFeeRate, ALL_METHODS, PAYPAL_METHODS,
+} = require('../helpers/paymentMethods.js');
+const { isConfigured: paypalConfigured } = require('../config/paypal.js');
+const { wantsLabel } = require('./fleetService.js');
 
 // SMTP_HOST set = generic SMTP provider; otherwise fall back to Gmail
 // many hosts block outbound SMTP ports — fail fast rather than hanging a request
@@ -178,14 +182,25 @@ const invoiceTable = (q) => {
 </table>`;
 };
 
+// an open request has no vehicle row until the admin picks one
 const tripRows = (q) => [
-  ['Vehicle', q.vehicle?.name || q.vehicle?.type || 'Selected vehicle'],
+  q.vehicle ? ['Vehicle', q.vehicle.name || q.vehicle.type || 'Selected vehicle'] : null,
   ['Date', `${q.date} at ${q.pickupTime}`],
   ['Pick-up', q.pickupAddress],
   q.stopoverAddress ? ['Stop over', q.stopoverAddress] : null,
   ['Drop-off', q.dropoffAddress],
   ['Passengers', q.passengers],
 ];
+
+// the customer's free-text note, set apart from the trip details
+const messageBlock = (message) => (message
+  ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+            style="background:#fafafa;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 20px;">
+       <tr><td style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+         <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                      color:${BRAND.muted};padding-bottom:5px;">Message</span>${esc(message)}
+       </td></tr></table>`
+  : '');
 
 async function sendAdminNewRequest(quote) {
   const to = adminRecipients();
@@ -211,39 +226,195 @@ async function sendAdminNewRequest(quote) {
           ...tripRows(quote),
           ['Trip type', quote.tripType],
         ])
-        + (quote.message
-          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                    style="background:#fafafa;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 20px;">
-               <tr><td style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
-                 <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-                              color:${BRAND.muted};padding-bottom:5px;">Message</span>${esc(quote.message)}
-               </td></tr></table>`
-          : '')
+        + messageBlock(quote.message)
         + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">Accept it with a price, or decline with a reason — the customer is emailed either way.</span>`),
     }),
   });
 }
 
+// the email lists the best fits; the dashboard holds the rest
+const EMAIL_MATCH_LIMIT = 10;
+
+// headline and secondary price for one matched vehicle; hourly rates when the route could not be priced
+function matchPrices(m) {
+  const total = (label) => (m.candidates || []).find((c) => c.label === label)?.total;
+  const retail = total('Retail');
+  const affiliate = total('Affiliate');
+  if (retail || affiliate) {
+    return {
+      main: retail ? money(retail) : 'No retail rate',
+      sub: affiliate ? `Affiliate ${money(affiliate)}` : '',
+    };
+  }
+  return {
+    main: m.rates?.retail ? `${money(m.rates.retail)}/h` : 'No rate in sheet',
+    sub: m.rates?.affiliate ? `Affiliate ${money(m.rates.affiliate)}/h` : '',
+  };
+}
+
+// many vehicles share a make and model, so the S/N is what tells them apart
+const matchMeta = (m) => [m.type, m.capacity ? `${m.capacity} passengers` : '', `S/N ${m.sn}`].filter(Boolean).join(' · ');
+
+const matchTable = (vehicles) => `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
+  ${vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m, i) => {
+    const p = matchPrices(m);
+    const top = i ? `border-top:1px solid ${BRAND.line};` : '';
+    return `
+  <tr>
+    <td style="padding:11px 16px;font-family:${FONT};${top}">
+      <div style="font-size:14px;font-weight:600;color:${BRAND.text};">${esc(m.name)}</div>
+      <div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(matchMeta(m))}</div>
+    </td>
+    <td align="right" style="padding:11px 16px;font-family:${FONT};white-space:nowrap;${top}">
+      <div style="font-size:14px;font-weight:700;color:${BRAND.text};">${esc(p.main)}</div>
+      ${p.sub ? `<div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(p.sub)}</div>` : ''}
+    </td>
+  </tr>`;
+  }).join('')}
+</table>`
+  + (vehicles.length > EMAIL_MATCH_LIMIT
+    ? para(`<span style="font-size:13px;color:${BRAND.muted};">…and ${vehicles.length - EMAIL_MATCH_LIMIT} more in the dashboard.</span>`)
+    : '');
+
+async function sendAdminOpenRequest(quote) {
+  const to = adminRecipients();
+  if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
+
+  const c = quote.customer;
+  const wants = wantsLabel(quote.wants);
+  const { vehicles = [], error } = quote.matching || {};
+  const summary = vehicles.length
+    ? `${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} fit this trip, smallest first. Prices are full trip totals before any edits.`
+    : error ? 'The fleet could not be checked automatically.' : 'No vehicles in the fleet fit this trip.';
+
+  await transporter.sendMail({
+    from: FROM(),
+    to,
+    subject: `New open quote request — ${c.name}`,
+    text: `New open quote request from ${c.name} (${c.email}${c.phone ? `, ${c.phone}` : ''})\n`
+      + `${wants} · ${quote.date} ${quote.pickupTime}\n`
+      + `${quote.pickupAddress} -> ${quote.dropoffAddress} · ${quote.passengers} passengers\n\n`
+      + (error ? `${error}\n` : '')
+      + `${summary}\n`
+      + vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m) => {
+        const p = matchPrices(m);
+        return `- ${m.name} (${matchMeta(m)}): ${p.main}${p.sub ? `, ${p.sub}` : ''}`;
+      }).join('\n')
+      + `\n\nPick a vehicle on the admin dashboard to send it to the customer, or decline.`,
+    html: shell({
+      heading: 'New open quote request',
+      preheader: `${c.name} — ${wants} on ${quote.date}`,
+      body:
+        para(`<strong>${esc(c.name)}</strong> wants a quote and has left the vehicle to us.`)
+        + detailRows([
+          ['Email', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ['Wants', wants],
+          ...tripRows(quote),
+          ['Trip type', quote.tripType],
+        ])
+        + messageBlock(quote.message)
+        + (error ? para(`<span style="color:${BRAND.bad};">${esc(error)}</span>`) : '')
+        + para(esc(summary))
+        + (vehicles.length ? matchTable(vehicles) : '')
+        + (site() ? button(`${site()}/admin.html`, 'Pick a vehicle') : '')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">Pick one, adjust the price if needed, and send it. The customer gets the vehicle, the price and a payment link.</span>`),
+    }),
+  });
+}
+
+// the offered vehicle, photo first, because an open request never saw it on the site
+const vehicleCard = (v = {}) => {
+  const meta = [v.type, v.capacity ? `Seats up to ${v.capacity}` : ''].filter(Boolean).join(' · ');
+  const photo = /^https?:\/\//i.test(v.pic || '') ? v.pic : '';
+  const more = site() && v.sn ? `${site()}/vehicle.html?sn=${encodeURIComponent(v.sn)}` : '';
+  return `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;overflow:hidden;">
+  ${photo ? `<tr><td style="font-size:0;line-height:0;"><img src="${esc(photo)}" alt="${esc(v.name)}" width="536"
+       style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:10px 10px 0 0;"></td></tr>` : ''}
+  <tr><td style="padding:14px 16px;font-family:${FONT};">
+    <div style="font-size:16px;font-weight:700;color:${BRAND.text};">${esc(v.name || 'Your vehicle')}</div>
+    ${meta ? `<div style="font-size:13px;color:${BRAND.muted};padding-top:3px;">${esc(meta)}</div>` : ''}
+    ${more ? `<div style="font-size:13px;padding-top:8px;"><a href="${esc(more)}" style="color:${BRAND.gold};font-weight:600;">See more photos</a></div>` : ''}
+  </td></tr>
+</table>`;
+};
+
+// Methods grouped by the fee they attract, highest first. Read from the same
+// settings the payment page charges by, so the email never disagrees with it.
+function feeTiers() {
+  const tiers = new Map();
+  ALL_METHODS
+    .filter((m) => paypalConfigured() || !PAYPAL_METHODS.includes(m))
+    .forEach((m) => {
+      const rate = processingFeeRate(m);
+      tiers.set(rate, [...(tiers.get(rate) || []), methodName(m)]);
+    });
+  return [...tiers]
+    .sort(([a], [b]) => b - a)
+    .map(([rate, names]) => ({
+      names: names.join(', '),
+      fee: rate ? `+${(rate * 100).toFixed(rate * 100 % 1 ? 2 : 0)}% fee` : 'No fee',
+    }));
+}
+
+const paymentMethodsText = () => 'Ways to pay (any fee is added at checkout):\n'
+  + feeTiers().map((t) => `- ${t.names}: ${t.fee}`).join('\n');
+
+// what each method adds, so the surcharge is no surprise at checkout
+const paymentMethods = ({ cashFullOnly = false } = {}) => `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
+  <tr><td colspan="2" style="padding:12px 16px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                             color:${BRAND.muted};font-family:${FONT};">Ways to pay</td></tr>
+  ${feeTiers().map((t) => `
+  <tr>
+    <td style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};
+               border-top:1px solid ${BRAND.line};">${esc(t.names)}</td>
+    <td align="right" style="padding:10px 16px;font-size:13px;font-weight:700;font-family:${FONT};white-space:nowrap;
+               color:${t.fee === 'No fee' ? BRAND.good : BRAND.text};border-top:1px solid ${BRAND.line};">${esc(t.fee)}</td>
+  </tr>`).join('')}
+</table>`
+  + para(`<span style="font-size:12px;color:${BRAND.muted};">Any processing fee is added at checkout for the method you choose. `
+    + `Apple Pay, Google Pay${paypalConfigured() ? ' and Venmo' : ''} show on supported devices.`
+    + `${cashFullOnly ? ' Cash is accepted for full payment only.' : ''}</span>`);
+
 async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const ttl = process.env.QUOTE_LINK_TTL_DAYS || 7;
+  // an open request is answered with the vehicle we picked for it
+  const offer = quote.kind === 'open';
+  const vehicleName = quote.vehicle?.name || 'A vehicle';
   await transporter.sendMail({
     from: FROM(),
     to: [quote.customer.email],
-    subject: 'Your Tour Rider quote is ready',
-    text: `Hello ${quote.customer.name},\n\nWe can cover this trip for ${money(quote.quotedAmount)}.\n`
+    subject: offer ? 'A vehicle is available for your trip' : 'Your Tour Rider quote is ready',
+    text: `Hello ${quote.customer.name},\n\n`
+      + (offer
+        ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${money(quote.quotedAmount)}.\n`
+        : `We can cover this trip for ${money(quote.quotedAmount)}.\n`)
       + `Pay in full, or pay a ${money(depositAmount)} deposit now with the balance charged on the day of pickup.\n\n`
+      + `${paymentMethodsText()}\n\n`
       + `Complete your booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
     html: shell({
-      heading: 'Your quote is ready',
-      preheader: `${money(quote.quotedAmount)} for your trip on ${quote.date}`,
+      heading: offer ? 'A vehicle is available' : 'Your quote is ready',
+      preheader: offer
+        ? `${vehicleName} for ${money(quote.quotedAmount)} on ${quote.date}`
+        : `${money(quote.quotedAmount)} for your trip on ${quote.date}`,
       body:
         para(`Hello ${esc(quote.customer.name)},`)
-        + para('Thanks for your request — we can cover this trip.')
+        + (offer
+          ? para("Good news: we found a vehicle for your trip. If you'd like to go ahead at this price, complete your booking below.")
+            + vehicleCard(quote.vehicle)
+          : para('Thanks for your request — we can cover this trip.'))
         + amountPanel('Total quote', money(quote.quotedAmount))
         + invoiceTable(quote)
         + detailRows(tripRows(quote))
         + para(`Pay in full now, or secure the booking with a <strong>${money(depositAmount)}</strong> deposit and we'll charge the balance to the same card on the day of pickup.`)
+        + paymentMethods({ cashFullOnly: true })
         + button(paymentUrl, 'Complete your booking')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you and expires in ${esc(ttl)} days. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),
@@ -467,6 +638,7 @@ async function sendBalanceLink(quote, paymentUrl) {
     to: [c.email],
     subject: `Balance due today for your Tour Rider trip — ${due}`,
     text: `Hello ${c.name},\n\nYour trip is today and the remaining balance of ${due} is now due.\n\n`
+      + `${paymentMethodsText()}\n\n`
       + `Pay the balance: ${paymentUrl}\n\n`
       + `Paying before pickup keeps things simple for you and your driver.`,
     html: shell({
@@ -477,6 +649,7 @@ async function sendBalanceLink(quote, paymentUrl) {
         + para('Your trip is today. Because your deposit was paid with a method we cannot charge again, the balance needs settling with this link.')
         + amountPanel('Balance due', due, `Already paid ${money(quote.amountPaid)}`)
         + detailRows(tripRows(quote))
+        + paymentMethods()
         + button(paymentUrl, 'Pay the balance')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),
@@ -588,6 +761,7 @@ async function sendAdminOfflineChosen(quote, amount, method) {
 
 module.exports = {
   sendAdminNewRequest,
+  sendAdminOpenRequest,
   sendAdminBookingConfirmed,
   sendBalanceChargeFailed,
   sendQuoteAccepted,
