@@ -6,6 +6,7 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const { formatInZone, zonedToUtc } = require('../helpers/datetime.js');
 const { round2 } = require('../helpers/pricing.js');
+const { balancePlan } = require('../helpers/paymentMethods.js');
 
 const METHOD_LABELS = {
   card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App Pay',
@@ -87,7 +88,7 @@ function drawHeader(doc, quote, kind) {
   doc.fillColor('#9ca3af').fontSize(9).font('Helvetica')
     .text(kind, left, 40, { width: right - left, align: 'right', characterSpacing: 1.5 });
   doc.fillColor('#9ca3af').fontSize(9)
-    .text(`Ref ${quote._id}`, left, 56, { width: right - left, align: 'right' });
+    .text(`Ref ${quote.reservationNumber || quote._id}`, left, 56, { width: right - left, align: 'right' });
 
   return { left, right, y: headerH + 32 };
 }
@@ -194,7 +195,7 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     if (fee > 0) {
       row(isDeposit ? 'Deposit' : 'Amount', money(round2(amountPaid - fee)));
       const pct = quote.processingFeeRate ? ` (${round2(quote.processingFeeRate * 100)}%)` : '';
-      row(`${method || 'Card'} processing fee${pct}`, money(fee));
+      row(`Processing fee${pct}`, money(fee));
     }
     row(isDeposit ? 'Deposit paid' : 'Paid in full', money(amountPaid), { strong: true });
     if (method) {
@@ -203,12 +204,14 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
       y += 14;
     }
     if (isDeposit && quote.remainingBalance > 0) {
-      row('Balance due on pickup day', money(quote.remainingBalance));
+      const plan = balancePlan(quote);
+      row(plan.how === 'link' ? 'Balance due on pickup day' : 'Balance due on arrival', money(plan.amount));
       doc.fillColor(MUTED).fontSize(8.5).font('Helvetica')
-        .text(quote.squareCardId
-          ? 'The balance will be charged automatically to the card on file on the morning of your trip.'
-          : 'We will email you a payment link for the balance on the morning of your trip.',
-          left, y, { width: right - left });
+        .text({
+          card: 'The balance, including the processing fee, will be charged automatically to the card on file on arrival of your vehicle.',
+          zelle: 'The balance is due via Zelle on arrival of the vehicle.',
+          link: 'We will email you a payment link for the balance on the morning of your trip.',
+        }[plan.how], left, y, { width: right - left });
       y += 22;
     } else {
       doc.fillColor(MUTED).fontSize(8.5).font('Helvetica')
@@ -264,7 +267,7 @@ function buildCalendarInvite(quote) {
     `Pick-up: ${quote.pickupAddress}`,
     quote.stopoverAddress ? `Stop over: ${quote.stopoverAddress}` : null,
     `Drop-off: ${quote.dropoffAddress}`,
-    `Ref: ${quote._id}`,
+    `Ref: ${quote.reservationNumber || quote._id}`,
   ].filter(Boolean).join('\n');
 
   const lines = [

@@ -1,3 +1,5 @@
+const { round2 } = require('./pricing.js');
+
 // Square tokenises all of these to the same Payments API source id.
 const SQUARE_METHODS = ['card', 'apple_pay', 'google_pay', 'cash_app'];
 // PayPal funds these through its Orders API; Venmo is a PayPal funding source.
@@ -29,6 +31,23 @@ function processingFeeRate(method) {
   return 0;
 }
 
+/**
+ * How the balance left after a deposit is collected, and what it will cost.
+ * A saved card is charged automatically on arrival with the same surcharge the
+ * deposit carried; a Zelle deposit settles its balance by Zelle on arrival;
+ * anything else is asked for by link, where the fee depends on the method used.
+ */
+function balancePlan(quote) {
+  const base = round2(Number(quote.remainingBalance) || 0);
+  if (quote.squareCardId) {
+    const stored = Number(quote.processingFeeRate);
+    const rate = quote.paymentMethod === 'card' && Number.isFinite(stored) ? stored : processingFeeRate('card');
+    const fee = round2(base * rate);
+    return { how: 'card', base, rate, fee, amount: round2(base + fee) };
+  }
+  return { how: quote.paymentMethod === 'zelle' ? 'zelle' : 'link', base, rate: 0, fee: 0, amount: base };
+}
+
 const LABELS = {
   card: 'card',
   apple_pay: 'Apple Pay',
@@ -50,5 +69,6 @@ module.exports = {
   canStoreCard,
   isOffline,
   processingFeeRate,
+  balancePlan,
   methodLabel,
 };

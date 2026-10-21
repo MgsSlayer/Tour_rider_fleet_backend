@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 
 // one priced row of the quote breakdown — tolls, gratuity, VAT, or anything custom
@@ -32,6 +33,8 @@ const matchSchema = new mongoose.Schema({
 }, { _id: false });
 
 const quoteSchema = new mongoose.Schema({
+  // what the customer quotes back, e.g. in a Zelle memo; the database id means nothing to them
+  reservationNumber: { type: String, unique: true, sparse: true },
   // an 'open' request arrives without a vehicle; the admin picks one before pricing it
   kind: { type: String, enum: ['vehicle', 'open'], default: 'vehicle' },
   // snapshot of the vehicle chosen on the fleet page, keyed by the sheet S/N
@@ -95,6 +98,8 @@ const quoteSchema = new mongoose.Schema({
   baseFare: Number,
   lineItems: [lineItemSchema],
   quotedAmount: Number,
+  // share of the total taken up front, set by the admin when sending; 1 means full payment only
+  depositRate: { type: Number, min: 0.01, max: 1 },
   declineReason: String,
   respondedAt: Date,
   respondedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -126,6 +131,8 @@ const quoteSchema = new mongoose.Schema({
   balanceFeeRate: Number,
   balanceProcessingFee: { type: Number, default: 0 },
   balanceChargeStartedAt: Date,
+  // a failed automatic charge is not retried on its own; the admin charges it from the dashboard
+  balanceChargeFailedAt: Date,
   // stops the pickup-day balance link being mailed more than once
   balanceLinkSentAt: Date,
 
@@ -138,5 +145,19 @@ const quoteSchema = new mongoose.Schema({
   offlineConfirmedAt: Date,
   offlineConfirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
+
+// TR- plus six digits: short enough for a Zelle memo, random so it says nothing about volume.
+// Assigned on first save, so bookings made before this get one the next time they change.
+quoteSchema.pre('validate', async function assignReservationNumber() {
+  if (this.reservationNumber) return;
+  for (let i = 0; i < 10; i += 1) {
+    const candidate = `TR-${crypto.randomInt(100000, 1000000)}`;
+    if (!(await this.constructor.exists({ reservationNumber: candidate }))) {
+      this.reservationNumber = candidate;
+      return;
+    }
+  }
+  throw new Error('Could not assign a reservation number');
+});
 
 module.exports = mongoose.model('Quote', quoteSchema);

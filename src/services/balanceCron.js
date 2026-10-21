@@ -4,6 +4,13 @@ const email = require('../services/emailService.js');
 const { createPaymentViaRest } = require('../controllers/payment.controller.js');
 const { zonedDayRange } = require('../helpers/datetime.js');
 const { newToken, hashToken, tokenTtlDays } = require('../helpers/tokens.js');
+const { balancePlan } = require('../helpers/paymentMethods.js');
+
+// the card on file is charged this long after the booked pickup time
+const ARRIVAL_GRACE_MINUTES = 15;
+// pickups further back than this are never charged automatically, so old unpaid
+// balances are left to the admin rather than swept up without warning
+const ARRIVAL_LOOKBACK_HOURS = 24;
 
 // Stable per-quote key: Square returns the original payment instead of charging
 // again, so a double-click or a repeated call cannot take the money twice.
@@ -65,7 +72,8 @@ async function chargeBalanceFor(quoteId) {
     return { ok: false, error: 'No outstanding balance to charge for this booking.', skipped: true };
   }
 
-  const amount = Number(quote.remainingBalance);
+  // the balance carries the same card surcharge the deposit did
+  const { amount, fee, rate } = balancePlan(quote);
   const idempotencyKey = balanceIdempotencyKey(quote);
   let payment = null;
   let sdkErr = null;
@@ -107,8 +115,12 @@ async function chargeBalanceFor(quoteId) {
     console.error(`balance charge failed for ${quote._id}: ${reason}`);
 
     // release the claim so a manual retry is possible; the stable idempotency
-    // key is what stops that retry from charging twice
-    await Quote.updateOne({ _id: quote._id }, { $unset: { balanceChargeStartedAt: '' } });
+    // key is what stops that retry from charging twice. The failure mark keeps
+    // the arrival job from retrying, and re-alerting, every few minutes.
+    await Quote.updateOne(
+      { _id: quote._id },
+      { $unset: { balanceChargeStartedAt: '' }, $set: { balanceChargeFailedAt: new Date() } }
+    );
 
     // a silently uncollected balance is the worst outcome — always alert
     email.sendBalanceChargeFailed(quote, reason)
@@ -118,6 +130,10 @@ async function chargeBalanceFor(quoteId) {
 
   quote.remainingBalancePaid = true;
   quote.remainingBalancePaymentId = payment?.id || null;
+  quote.balanceMethod = 'card';
+  quote.balanceFeeRate = rate;
+  quote.balanceProcessingFee = fee;
+  quote.balanceChargeFailedAt = undefined;
   quote.amountPaid = Number((Number(quote.amountPaid) + amount).toFixed(2));
   await quote.save();
 
@@ -180,18 +196,19 @@ async function sendBalanceLinkFor(quoteId) {
   return { ok: true, amount: Number(quote.remainingBalance) };
 }
 
-// charges outstanding balances on saved cards for rides picking up today
-async function chargeDueBalances() {
-  // "today" means today where the fleet operates, not where the server runs
-  const { start, end } = zonedDayRange();
-
+/** Charges saved cards once the vehicle has arrived: 15 minutes after pickup. */
+async function chargeArrivedBalances(now = new Date()) {
   const due = await Quote.find({
-    pickupDateTime: { $gte: start, $lt: end },
+    pickupDateTime: {
+      $lte: new Date(now.getTime() - ARRIVAL_GRACE_MINUTES * 60 * 1000),
+      $gte: new Date(now.getTime() - ARRIVAL_LOOKBACK_HOURS * 60 * 60 * 1000),
+    },
     status: 'paid',
     paymentOption: 'deposit',
     remainingBalancePaid: { $ne: true },
     remainingBalance: { $gt: 0 },
     squareCardId: { $exists: true, $ne: null },
+    $or: [{ balanceChargeFailedAt: null }, { balanceChargeFailedAt: { $exists: false } }],
   }).select('_id');
 
   let charged = 0;
@@ -199,12 +216,22 @@ async function chargeDueBalances() {
     const result = await chargeBalanceFor(_id);
     if (result.ok) charged += 1;
   }
+  return { due: due.length, charged };
+}
 
-  // deposits taken by wallet or PayPal left no card, so those are asked for by link
+/**
+ * Mails a balance link on the morning of pickup for deposits with no card behind
+ * them. Zelle deposits are left out: their balance is paid by Zelle on arrival.
+ */
+async function sendDueBalanceLinks() {
+  // "today" means today where the fleet operates, not where the server runs
+  const { start, end } = zonedDayRange();
+
   const byLink = await Quote.find({
     pickupDateTime: { $gte: start, $lt: end },
     status: 'paid',
     paymentOption: 'deposit',
+    paymentMethod: { $ne: 'zelle' },
     remainingBalancePaid: { $ne: true },
     remainingBalance: { $gt: 0 },
     $or: [{ squareCardId: { $exists: false } }, { squareCardId: null }],
@@ -216,8 +243,9 @@ async function chargeDueBalances() {
     const result = await sendBalanceLinkFor(_id);
     if (result.ok) linked += 1;
   }
-
-  return { due: due.length, charged, linkable: byLink.length, linked };
+  return { linkable: byLink.length, linked };
 }
 
-module.exports = { chargeDueBalances, chargeBalanceFor, sendBalanceLinkFor, balanceIdempotencyKey };
+module.exports = {
+  chargeArrivedBalances, sendDueBalanceLinks, chargeBalanceFor, sendBalanceLinkFor, balanceIdempotencyKey,
+};

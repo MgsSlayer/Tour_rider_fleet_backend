@@ -1,9 +1,9 @@
 const Quote = require('../models/quote.model.js');
 const email = require('../services/emailService.js');
-const { computeQuote } = require('../helpers/pricing.js');
+const { computeQuote, round2 } = require('../helpers/pricing.js');
 const { zonedToUtc, tripMinutes } = require('../helpers/datetime.js');
 const v = require('../helpers/validate.js');
-const { hashToken, newToken, depositRate } = require('../helpers/tokens.js');
+const { hashToken, newToken, depositRate, quoteDepositRate } = require('../helpers/tokens.js');
 const { ALL_METHODS, processingFeeRate } = require('../helpers/paymentMethods.js');
 const { fetchFleet, matchFleet, VEHICLE_CATEGORIES, CITY_IDS } = require('../services/fleetService.js');
 
@@ -15,8 +15,16 @@ const MIN_TRIP_MESSAGE = `Trips run for a minimum of ${MIN_TRIP_HOURS} hours. Pl
 // the form posts wall-clock times in the fleet's timezone, not the server's
 const toDateTime = (date, time) => zonedToUtc(date, time);
 
+// what the customer is asked for up front; null when the booking is full payment only.
+// Rounded exactly as resolvePayable rounds what it charges, so the page never shows a cent less.
+const depositFor = (q) => {
+  const rate = quoteDepositRate(q);
+  return q.quotedAmount && rate < 1 ? round2(round2(q.quotedAmount) * rate) : null;
+};
+
 const publicView = (q) => ({
   id: q._id,
+  reservationNumber: q.reservationNumber,
   status: q.status,
   vehicle: q.vehicle,
   customerName: q.customer.name,
@@ -31,7 +39,8 @@ const publicView = (q) => ({
   baseFare: q.baseFare,
   lineItems: (q.lineItems || []).map((l) => ({ label: l.label, amount: l.amount })),
   quotedAmount: q.quotedAmount,
-  depositAmount: q.quotedAmount ? Number((q.quotedAmount * depositRate()).toFixed(2)) : null,
+  depositAmount: depositFor(q),
+  depositPercent: Math.round(quoteDepositRate(q) * 100),
   amountPaid: q.amountPaid,
   remainingBalance: q.remainingBalance,
 });
@@ -194,7 +203,8 @@ const listQuotes = async (req, res) => {
     const filter = {};
     if (req.query.status) filter.status = req.query.status;
     const quotes = await Quote.find(filter).sort({ createdAt: -1 }).limit(200).lean();
-    return res.json({ quotes });
+    // the dashboard pre-fills each new quote's deposit with this
+    return res.json({ quotes, depositPercent: Math.round(depositRate() * 100) });
   } catch (err) {
     console.error('listQuotes error:', err);
     return res.status(500).json({ error: 'Could not load requests' });
@@ -219,6 +229,16 @@ const acceptQuote = async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
 
+    // set per booking by the admin; 100 means the customer pays in full
+    let depositPercent;
+    try {
+      depositPercent = req.body?.depositPercent === undefined
+        ? Math.round(depositRate() * 100)
+        : v.integer(req.body.depositPercent, 'Deposit', { min: 1, max: 100 });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
     const quote = await Quote.findById(req.params.id);
     if (!quote) return res.status(404).json({ error: 'Request not found' });
     if (quote.status !== 'pending') {
@@ -239,6 +259,7 @@ const acceptQuote = async (req, res) => {
     quote.baseFare = priced.baseFare;
     quote.lineItems = priced.lineItems;
     quote.quotedAmount = priced.total;
+    quote.depositRate = depositPercent / 100;
     quote.paymentTokenHash = hashToken(rawToken);
     quote.paymentTokenExpires = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     quote.respondedAt = new Date();
@@ -247,7 +268,7 @@ const acceptQuote = async (req, res) => {
 
     const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
     const paymentUrl = `${base}/payment.html?token=${rawToken}`;
-    const deposit = Number((quote.quotedAmount * depositRate()).toFixed(2));
+    const deposit = depositFor(quote);
 
     try {
       await email.sendQuoteAccepted(quote, paymentUrl, deposit);

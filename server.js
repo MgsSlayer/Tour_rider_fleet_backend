@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const dbconnect = require('./src/config/dbconnect.js');
-const { chargeDueBalances } = require('./src/services/balanceCron.js');
+const { chargeArrivedBalances, sendDueBalanceLinks } = require('./src/services/balanceCron.js');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -59,9 +59,14 @@ dbconnect()
   .then(() => {
     app.listen(PORT, () => console.log(`TR backend listening on ${PORT}`));
 
-    // balances for today's pickups, every morning at 08:00 server time
+    // saved cards are charged 15 minutes after pickup; checked every 5 minutes
+    cron.schedule('*/5 * * * *', () => {
+      chargeArrivedBalances().catch((e) => console.error('arrival charge cron failed:', e.message));
+    });
+
+    // balance links for deposits with no card behind them, every morning at 08:00 server time
     cron.schedule('0 8 * * *', () => {
-      chargeDueBalances().catch((e) => console.error('balance cron failed:', e.message));
+      sendDueBalanceLinks().catch((e) => console.error('balance link cron failed:', e.message));
     });
   })
   .catch((err) => {

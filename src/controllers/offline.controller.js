@@ -65,7 +65,7 @@ const chooseOffline = async (req, res) => {
       method: methodLabel(method),
       amountDue: round2(amount),
       remainingBalance: mode === 'balance' ? 0 : remaining,
-      instructions: instructionsFor(method),
+      instructions: instructionsFor(method, quote),
     });
   } catch (err) {
     console.error('chooseOffline error:', err);
@@ -73,18 +73,19 @@ const chooseOffline = async (req, res) => {
   }
 };
 
-// MAIL_FROM carries a display name, so take just the address out of it
-const bareAddress = (value) => {
-  const m = /<([^>]+)>/.exec(String(value || ''));
-  return (m ? m[1] : String(value || '')).trim();
-};
+// Zelle is received by the parent company, so its name is what the customer's bank shows
+const zelleRecipient = () => ({
+  to: process.env.ZELLE_RECIPIENT || '917-822-2713',
+  name: process.env.ZELLE_RECIPIENT_NAME || 'ITON COLLECTION LLC',
+});
 
-function instructionsFor(method) {
+function instructionsFor(method, quote) {
   if (method === 'zelle') {
-    const to = process.env.ZELLE_RECIPIENT || bareAddress(process.env.MAIL_FROM);
-    return to
-      ? `Send your Zelle payment to ${to}, using your name as the reference. Your booking is held until it arrives.`
-      : 'Call us for our Zelle details. Your booking is held until payment arrives.';
+    const { to, name } = zelleRecipient();
+    // names repeat across customers; the reservation number ties the money to one booking
+    const memo = quote?.reservationNumber ? `your reservation number, ${quote.reservationNumber},` : 'your name';
+    return `Send your Zelle payment to ${to} (${name}, Tour Rider's parent company) with ${memo} in the memo. `
+      + 'Your booking is held until it arrives.';
   }
   const phone = process.env.CONTACT_PHONE || '917-822-2713';
   return `Call us on ${phone} to arrange cash payment. Your booking is held until we confirm it.`;
@@ -107,6 +108,7 @@ const confirmOffline = async (req, res) => {
 
     if (settlingBalance) {
       quote.remainingBalancePaid = true;
+      quote.balanceMethod = quote.balanceMethod || quote.paymentMethod;
       quote.amountPaid = round2(Number(quote.amountPaid || 0) + Number(quote.remainingBalance));
     } else {
       const total = round2(quote.quotedAmount);
@@ -123,8 +125,11 @@ const confirmOffline = async (req, res) => {
     quote.paymentTokenExpires = undefined;
     await quote.save();
 
-    email.sendPaymentReceipt(quote, quote.amountPaid, quote.paymentOption === 'deposit')
-      .catch((e) => console.error('receipt email failed:', e.message));
+    // a settled balance gets the paid-in-full email, not a second deposit receipt
+    const receipt = settlingBalance
+      ? email.sendBalanceCharged(quote)
+      : email.sendPaymentReceipt(quote, quote.amountPaid, quote.paymentOption === 'deposit');
+    receipt.catch((e) => console.error('receipt email failed:', e.message));
 
     return res.json({ success: true, amountPaid: quote.amountPaid, remainingBalance: quote.remainingBalance });
   } catch (err) {
@@ -133,4 +138,4 @@ const confirmOffline = async (req, res) => {
   }
 };
 
-module.exports = { chooseOffline, confirmOffline, instructionsFor };
+module.exports = { chooseOffline, confirmOffline, instructionsFor, zelleRecipient };

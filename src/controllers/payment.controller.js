@@ -100,10 +100,9 @@ const payQuote = async (req, res) => {
     let customerId = null;
     let cardId = null;
 
-    // keeping the card is the customer's choice, and only a real card can be kept;
-    // without one the balance is asked for by link instead of charged
-    const wantsCardStored = req.body?.saveCard === true;
-    if (mode === 'initial' && isDeposit && canStoreCard(method) && wantsCardStored) {
+    // a card deposit always keeps the card so the balance can be charged on arrival;
+    // wallets cannot be kept, so their balance is asked for by link instead
+    if (mode === 'initial' && isDeposit && canStoreCard(method)) {
       try {
         customerId = await getOrCreateSquareCustomer(quote.customer);
         const cardRes = await client.cards.create({

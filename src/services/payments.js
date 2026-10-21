@@ -5,7 +5,7 @@
 const Quote = require('../models/quote.model.js');
 const email = require('./emailService.js');
 const { round2 } = require('../helpers/pricing.js');
-const { hashToken, depositRate } = require('../helpers/tokens.js');
+const { hashToken, quoteDepositRate } = require('../helpers/tokens.js');
 const { methodLabel, processingFeeRate, isOffline } = require('../helpers/paymentMethods.js');
 
 /**
@@ -48,8 +48,13 @@ async function resolvePayable(rawToken, paymentOption, method = 'card') {
   }
 
   const total = round2(quote.quotedAmount);
+  const rate = quoteDepositRate(quote);
+  // a booking the admin set to 100% has no deposit to take
+  if (paymentOption === 'deposit' && rate >= 1) {
+    return { error: { status: 400, message: 'This booking is paid in full. Please choose "Pay in full".' } };
+  }
   const isDeposit = paymentOption === 'deposit';
-  const subtotal = isDeposit ? round2(total * depositRate()) : total;
+  const subtotal = isDeposit ? round2(total * rate) : total;
   return {
     quote,
     mode: 'initial',

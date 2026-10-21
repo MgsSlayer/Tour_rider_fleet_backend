@@ -13,9 +13,17 @@ const depositRate = () => {
   return Number.isFinite(r) && r > 0 && r < 1 ? r : 0.5;
 };
 
+// the rate the admin set on this booking; bookings sent before that fall back to the default
+const quoteDepositRate = (quote) => {
+  const r = Number(quote?.depositRate);
+  return Number.isFinite(r) && r > 0 && r <= 1 ? r : depositRate();
+};
+
 const tokenTtlDays = () => {
   const d = Number(process.env.PAYMENT_LINK_TTL_DAYS);
   return Number.isFinite(d) && d > 0 ? d : 14;
 };
 
-module.exports = { hashToken, newToken, newIdempotencyKey, depositRate, tokenTtlDays };
+module.exports = {
+  hashToken, newToken, newIdempotencyKey, depositRate, quoteDepositRate, tokenTtlDays,
+};
