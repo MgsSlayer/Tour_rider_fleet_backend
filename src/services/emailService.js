@@ -8,6 +8,9 @@ const { round2 } = require('../helpers/pricing.js');
 const { isConfigured: paypalConfigured } = require('../config/paypal.js');
 const { wantsLabel } = require('./fleetService.js');
 
+// USE_RESEND=true sends everything through Resend and leaves SMTP idle; anything else keeps SMTP
+const useResend = () => String(process.env.USE_RESEND || '').trim().toLowerCase() === 'true';
+
 // SMTP_HOST set = generic SMTP provider; otherwise fall back to Gmail
 // many hosts block outbound SMTP ports — fail fast rather than hanging a request
 const timeouts = { connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000 };
@@ -28,10 +31,58 @@ const transporter = nodemailer.createTransport(
       }
 );
 
-// surfaces a blocked SMTP port at boot instead of on the first customer request
-transporter.verify()
-  .then(() => console.log('smtp ready'))
-  .catch((e) => console.error(`SMTP UNAVAILABLE: ${e.message} — emails will fail`));
+// surfaces a blocked SMTP port or a missing key at boot instead of on the first customer request
+if (useResend()) {
+  console.log(process.env.RESEND_API_KEY ? 'mail via resend' : 'RESEND_API_KEY NOT SET — emails will fail');
+} else {
+  transporter.verify()
+    .then(() => console.log('smtp ready'))
+    .catch((e) => console.error(`SMTP UNAVAILABLE: ${e.message} — emails will fail`));
+}
+
+const RESEND_ATTEMPTS = 3;
+
+/**
+ * Sends one nodemailer-shaped message through Resend's REST API. Attachments go
+ * as base64; Resend works out the type from the filename, so .pdf and .ics need
+ * nothing more. A per-second rate limit is waited out; a used-up quota is not.
+ */
+async function sendViaResend({ from, to, bcc, subject, text, html, attachments = [] }) {
+  const body = JSON.stringify({
+    from,
+    to,
+    subject,
+    html,
+    text,
+    ...(bcc && bcc.length ? { bcc } : {}),
+    ...(attachments.length ? {
+      attachments: attachments.map((a) => ({
+        filename: a.filename,
+        content: Buffer.from(a.content).toString('base64'),
+      })),
+    } : {}),
+  });
+
+  for (let attempt = 1; ; attempt += 1) {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return data;
+
+    const throttled = res.status === 429 && data.name === 'rate_limit_exceeded';
+    if (!throttled || attempt >= RESEND_ATTEMPTS) {
+      throw new Error(`Resend: ${data.message || data.name || `HTTP ${res.status}`}`);
+    }
+    const wait = Number(res.headers.get('retry-after'));
+    await new Promise((r) => setTimeout(r, (Number.isFinite(wait) && wait > 0 ? wait : 1) * 1000));
+  }
+}
+
+// every email goes through here, so switching provider is one setting
+const sendMail = (message) => (useResend() ? sendViaResend(message) : transporter.sendMail(message));
 
 // methodLabel reads naturally mid-sentence; a table cell wants it capitalised
 const methodName = (m) => {
@@ -226,7 +277,7 @@ async function sendAdminNewRequest(quote) {
   if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
 
   const c = quote.customer;
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     subject: `New quote request — ${c.name}`,
@@ -309,7 +360,7 @@ async function sendAdminOpenRequest(quote) {
     ? `${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} fit this trip, smallest first. Prices are full trip totals before any edits.`
     : error ? 'The fleet could not be checked automatically.' : 'No vehicles in the fleet fit this trip.';
 
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     subject: `New Open Quote Request — ${c.name}`,
@@ -410,7 +461,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const offer = quote.kind === 'open';
   const vehicleName = quote.vehicle?.name || 'A vehicle';
   const depositPct = pct(quoteDepositRate(quote));
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: offer ? 'A vehicle is available for your trip' : 'Your Tour Rider quote is ready',
@@ -452,7 +503,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
 }
 
 async function sendQuoteDeclined(quote) {
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: 'About your Tour Rider request',
@@ -524,10 +575,15 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
       async () => buildCalendarInvite(quote)),
   ])).filter(Boolean);
 
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     attachments,
+    // Resend rejects a message without a subject; SMTP used to send it blank
+    subject: `${isDeposit ? 'Deposit' : 'Payment'} received — your Tour Rider ride is confirmed`,
+    text: `Hello ${quote.customer.name},\n\nWe've received your payment of ${money(amount)} and your ride is confirmed.\n`
+      + `${isDeposit ? balanceSentence(plan, { html: false }) : 'Your trip is paid in full. Nothing further is due.'}\n\n`
+      + `Reservation: ${refOf(quote)}\nYour invoice and a calendar invite are attached.`,
     html: shell({
       heading: 'Payment received',
       accent: BRAND.good,
@@ -573,7 +629,7 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
   ])).filter(Boolean);
 
   const c = quote.customer;
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     attachments,
@@ -609,7 +665,7 @@ async function sendBalanceCharged(quote) {
   const onFile = !!quote.squareCardId;
   const how = onFile ? 'charged to the card on file' : `paid by ${methodLabel(quote.balanceMethod)}`;
   // admins are bcc'd so their addresses never appear in the customer's copy
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     bcc: adminRecipients(),
@@ -643,7 +699,7 @@ async function sendBalanceChargeFailed(quote, reason) {
 
   const c = quote.customer;
   const attempted = money(balancePlan(quote).amount);
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     subject: `ACTION NEEDED — balance charge failed for ${c.name}`,
@@ -685,7 +741,7 @@ async function sendBalanceChargeFailed(quote, reason) {
 async function sendBalanceLink(quote, paymentUrl) {
   const c = quote.customer;
   const due = money(quote.remainingBalance);
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [c.email],
     subject: `Balance due today for your Tour Rider trip — ${due}`,
@@ -714,7 +770,7 @@ async function sendAdminBalanceLinkSent(quote) {
   if (!to.length) return;
 
   const c = quote.customer;
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     subject: `Balance link sent to ${c.name} — ${money(quote.remainingBalance)} outstanding`,
@@ -768,7 +824,7 @@ async function sendOfflineInstructions(quote, amount, method, isDeposit) {
   const label = method === 'zelle' ? 'Zelle' : 'cash';
   const c = quote.customer;
 
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to: [c.email],
     subject: `How to pay for your Tour Rider booking — ${money(amount)} by ${label}`,
@@ -808,7 +864,7 @@ async function sendAdminOfflineChosen(quote, amount, method) {
 
   const c = quote.customer;
   const label = method === 'zelle' ? 'Zelle' : 'cash';
-  await transporter.sendMail({
+  await sendMail({
     from: FROM(),
     to,
     subject: `${c.name} will pay ${money(amount)} by ${label}${quote.reservationNumber ? ` — ${quote.reservationNumber}` : ''}`,
@@ -838,6 +894,7 @@ async function sendAdminOfflineChosen(quote, amount, method) {
 }
 
 module.exports = {
+  useResend,
   sendAdminNewRequest,
   sendAdminOpenRequest,
   sendAdminBookingConfirmed,

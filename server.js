@@ -4,11 +4,14 @@ const cors = require('cors');
 const cron = require('node-cron');
 const dbconnect = require('./src/config/dbconnect.js');
 const { chargeArrivedBalances, sendDueBalanceLinks } = require('./src/services/balanceCron.js');
+const { useResend } = require('./src/services/emailService.js');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-const REQUIRED_ENV = ['DB_CONNECT_STRING', 'JWT_SECRET', 'SMTP_USER', 'SMTP_PASS'];
+// only the mail provider that is switched on needs credentials
+const MAIL_ENV = useResend() ? ['RESEND_API_KEY'] : ['SMTP_USER', 'SMTP_PASS'];
+const REQUIRED_ENV = ['DB_CONNECT_STRING', 'JWT_SECRET', ...MAIL_ENV];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length) {
   console.error(`Missing required env vars: ${missing.join(', ')}. See .env.example`);
