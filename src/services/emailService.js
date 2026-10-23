@@ -261,8 +261,8 @@ const gratuityChoices = (q) => gratuityOptions(q).map((o) => `${o.percent}% ${mo
 const CARD_HOLD_NOTE = 'Paying by card? Your card is kept on file until 48 hours after your trip, '
   + 'for any damage or cleaning charges, then removed.';
 
-const GRATUITY_HOW = 'Choose at checkout and add it to your online payment, or pay it in cash to your driver. '
-  + 'With a deposit, a gratuity added online is collected with the balance.';
+const GRATUITY_HOW = 'Choose your gratuity option at checkout. You can add it to your online payment or pay your driver in cash. '
+  + 'If you pay a deposit, any gratuity added online will be charged with the remaining balance.';
 
 const gratuityChoice = (q) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
