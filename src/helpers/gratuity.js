@@ -5,7 +5,15 @@ const { round2 } = require('./pricing.js');
 const GRATUITY_PERCENTS = [10, 15, 20];
 const DEFAULT_GRATUITY_PERCENT = 15;
 
-const gratuityAmount = (quote, percent) => round2(round2(Number(quote.baseFare) || 0) * percent / 100);
+// the base fare and/or the quote's lines the admin chose; quotes from before that choice use the base fare
+function gratuityBasisTotal(quote) {
+  const basis = quote.gratuity?.basis?.length ? quote.gratuity.basis : ['base'];
+  return round2(basis.reduce((sum, id) => sum + (id === 'base'
+    ? round2(Number(quote.baseFare) || 0)
+    : Number((quote.lineItems || []).find((l) => l.id === id)?.amount) || 0), 0));
+}
+
+const gratuityAmount = (quote, percent) => round2(gratuityBasisTotal(quote) * percent / 100);
 
 // the three choices with their amounts, as the email and payment page show them
 const gratuityOptions = (quote) => GRATUITY_PERCENTS.map((percent) => ({ percent, amount: gratuityAmount(quote, percent) }));

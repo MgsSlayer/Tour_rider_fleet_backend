@@ -274,6 +274,16 @@ const acceptQuote = async (req, res) => {
     if (customerGratuity && priced.lineItems.some((l) => /gratuity/i.test(l.label))) {
       return res.status(400).json({ error: 'Remove the Gratuity line: the customer chooses it at checkout.' });
     }
+    // what that percentage is worked out on: the base fare and/or lines of this quote
+    let gratuityBasis = ['base'];
+    if (customerGratuity && req.body?.gratuityBasis !== undefined) {
+      const ids = req.body.gratuityBasis;
+      const known = ['base', ...priced.lineItems.map((l) => l.id)];
+      if (!Array.isArray(ids) || !ids.length || ids.some((id) => typeof id !== 'string' || !known.includes(id))) {
+        return res.status(400).json({ error: 'Gratuity can only be based on the base fare or lines in this quote.' });
+      }
+      gratuityBasis = [...new Set(ids)];
+    }
 
     const quote = await Quote.findById(req.params.id);
     if (!quote) return res.status(404).json({ error: 'Request not found' });
@@ -296,7 +306,7 @@ const acceptQuote = async (req, res) => {
     quote.lineItems = priced.lineItems;
     quote.quotedAmount = priced.total;
     quote.depositRate = depositPercent / 100;
-    quote.gratuity = customerGratuity ? { customerChooses: true } : undefined;
+    quote.gratuity = customerGratuity ? { customerChooses: true, basis: gratuityBasis } : undefined;
     quote.paymentTokenHash = hashToken(rawToken);
     quote.paymentTokenExpires = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     quote.respondedAt = new Date();

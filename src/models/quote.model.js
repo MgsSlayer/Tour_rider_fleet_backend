@@ -135,6 +135,8 @@ const quoteSchema = new mongoose.Schema({
   // customer's pick lands here; `method` says whether it was paid online or in cash
   gratuity: {
     customerChooses: Boolean,
+    // what the percentage is worked out on: 'base' and/or line item ids; empty means the base fare
+    basis: { type: [String], default: undefined },
     percent: Number,
     amount: Number,
     method: { type: String, enum: ['online', 'cash'] },
