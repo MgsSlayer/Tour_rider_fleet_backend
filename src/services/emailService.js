@@ -516,7 +516,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
       body:
         para(`Hello ${esc(quote.customer.name)},`)
         + (offer
-          ? para("Good news: we found a vehicle for your trip. If you'd like to go ahead at this price, complete your booking below.")
+          ? para('Good news! We’ve secured a vehicle for your trip. If you’re happy with the quoted price, please proceed with completing your booking.')
             + vehicleCard(quote.vehicle)
           : para('Thanks for your request — we can cover this trip.'))
         + amountPanel(chooses ? 'Total before gratuity' : 'Total quote', money(quote.quotedAmount))
