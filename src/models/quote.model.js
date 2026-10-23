@@ -81,7 +81,8 @@ const quoteSchema = new mongoose.Schema({
   passengers: { type: Number, required: true, min: 1 },
   date: { type: String, required: true },
   pickupTime: { type: String, required: true },
-  finalDropoffTime: { type: String, required: true },
+  // a one-way trip without stops gives no drop-off time
+  finalDropoffTime: { type: String, required() { return this.tripType !== 'one-way'; } },
   pickupAddress: { type: String, required: true },
   // kept for bookings made before multiple stop-overs; new ones use `stopovers`
   stopoverAddress: String,

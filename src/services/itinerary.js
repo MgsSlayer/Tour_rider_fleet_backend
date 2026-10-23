@@ -53,7 +53,7 @@ function itineraryRows(quote) {
   ];
   stopRows(quote).forEach((row) => rows.push(row));
   rows.push(['Drop-off address', quote.dropoffAddress]);
-  rows.push(['Final drop-off', `${quote.finalDropoffTime} (${quote.date})`]);
+  if (quote.finalDropoffTime) rows.push(['Final drop-off', `${quote.finalDropoffTime} (${quote.date})`]);
   if (quote.message) rows.push(['Customer note', quote.message]);
   // the driver needs to know whether a tip is coming, never how much
   if (quote.gratuity?.method) {
@@ -322,8 +322,10 @@ const fold = (line) => {
 /** An .ics VEVENT for the trip, stable UID so re-sends update rather than duplicate. */
 function buildCalendarInvite(quote) {
   const start = new Date(quote.pickupDateTime);
-  let end = zonedToUtc(quote.date, quote.finalDropoffTime);
-  if (!end) end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  let end = quote.finalDropoffTime ? zonedToUtc(quote.date, quote.finalDropoffTime) : null;
+  // no drop-off time (one way): end after the estimated drive, or two hours when that is unknown
+  const driveMinutes = quote.suggestion?.payload?.route?.driveMinutes || quote.matching?.route?.driveMinutes;
+  if (!end) end = new Date(start.getTime() + (driveMinutes || 120) * 60 * 1000);
   // a drop-off at or before pickup means the trip runs past midnight
   if (end <= start) end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
 

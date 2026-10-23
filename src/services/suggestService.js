@@ -119,7 +119,8 @@ const ROUND_UP_AFTER_MINUTES = 15;
  * and never under the minimum. `minutes` is the trip length before rounding.
  */
 function billableHours(quote, driveMinutes) {
-  const booked = tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime);
+  // a one-way trip with no drop-off time is billed on the drive alone
+  const booked = quote.finalDropoffTime ? tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime) : 0;
   if (booked === null) throw new Error('This request has an unreadable date or time');
   const minutes = Math.max(booked, driveMinutes);
   // more than 15 minutes past the hour counts as a full hour; exactly 15 does not.

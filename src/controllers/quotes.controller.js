@@ -69,17 +69,23 @@ function readStops(b) {
 // the trip fields both quote pages send
 const readTrip = (b) => {
   const L = v.LIMITS;
+  const tripType = v.oneOf(b.tripType, 'Trip type', ['roundtrip', 'one-way', 'shuttle']);
+  const stopovers = readStops(b);
+  // a one-way trip with no stops has no drop-off time to give
+  const dropoffOptional = tripType === 'one-way' && !stopovers.length;
   return {
     name: v.text(b.name, 'Name', { max: L.name }),
     email: v.email(b.email),
     phone: v.text(b.phone, 'Phone number', { required: false, max: L.phone }),
-    tripType: v.oneOf(b.tripType, 'Trip type', ['roundtrip', 'one-way', 'shuttle']),
+    tripType,
     passengers: v.integer(b.passengers, 'Passengers', { min: 1, max: 100 }),
     date: v.isoDate(b.date, 'Date'),
     pickupTime: v.clockTime(b.pickupTime, 'Pick-up time'),
-    finalDropoffTime: v.clockTime(b.finalDropoffTime, 'Final drop-off time'),
+    finalDropoffTime: dropoffOptional && !b.finalDropoffTime
+      ? undefined
+      : v.clockTime(b.finalDropoffTime, 'Final drop-off time'),
     pickupAddress: v.text(b.pickupAddress, 'Pick-up address', { max: L.address }),
-    stopovers: readStops(b),
+    stopovers,
     dropoffAddress: v.text(b.dropoffAddress, 'Drop-off address', { max: L.address }),
     message: v.text(b.message, 'Message', { required: false, max: L.message }),
     coords: {
@@ -95,6 +101,8 @@ function pickupInstant(data, { enforceMinimum = true } = {}) {
   if (!at) throw new v.ValidationError('Invalid date or pick-up time');
   if (at.getTime() < Date.now()) throw new v.ValidationError('Pick-up date and time must be in the future');
 
+  // without a drop-off time there is no length to check; the suggested price carries the 3-hour minimum
+  if (!data.finalDropoffTime) return at;
   const booked = tripMinutes(data.date, data.pickupTime, data.finalDropoffTime);
   if (booked === null) throw new v.ValidationError('Invalid date or pick-up time');
   if (enforceMinimum && booked < MIN_TRIP_HOURS * 60) throw new v.ValidationError(MIN_TRIP_MESSAGE);
