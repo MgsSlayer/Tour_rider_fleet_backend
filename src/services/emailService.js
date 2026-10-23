@@ -1,5 +1,8 @@
 const nodemailer = require('nodemailer');
-const { buildItineraryPDF, buildInvoicePDF, buildCalendarInvite } = require('./itinerary.js');
+const {
+  buildItineraryPDF, buildInvoicePDF, buildChargeInvoicePDF, buildCalendarInvite,
+} = require('./itinerary.js');
+const { formatInZone } = require('../helpers/datetime.js');
 const {
   methodLabel, processingFeeRate, balancePlan, ALL_METHODS, PAYPAL_METHODS,
 } = require('../helpers/paymentMethods.js');
@@ -8,6 +11,7 @@ const { round2 } = require('../helpers/pricing.js');
 const { isConfigured: paypalConfigured } = require('../config/paypal.js');
 const { wantsLabel } = require('./fleetService.js');
 const { stopRows } = require('../helpers/stops.js');
+const { gratuityOptions, bookingTotal, gratuityLabel } = require('../helpers/gratuity.js');
 
 // USE_RESEND=true sends everything through Resend and leaves SMTP idle; anything else keeps SMTP
 const useResend = () => String(process.env.USE_RESEND || '').trim().toLowerCase() === 'true';
@@ -227,7 +231,9 @@ const button = (url, label) => `
 // itemised charges — only rendered when the quote actually has extras
 const invoiceTable = (q) => {
   const lines = q.lineItems || [];
-  if (!lines.length) return '';
+  // once chosen: added online it is part of the total, in cash it is listed after it
+  const tip = q.gratuity?.method ? q.gratuity : null;
+  if (!lines.length && !tip) return '';
 
   const row = (label, value, opts = {}) => `
   <tr>
@@ -244,9 +250,28 @@ const invoiceTable = (q) => {
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${row('Base fare', money(q.baseFare))}
   ${lines.map((l) => row(l.label, money(l.amount), { top: true })).join('')}
-  ${row('Total', money(q.quotedAmount), { top: true, strong: true })}
+  ${tip?.method === 'online' ? row(`Gratuity (${tip.percent}%)`, money(tip.amount), { top: true }) : ''}
+  ${row('Total', money(bookingTotal(q)), { top: true, strong: true })}
+  ${tip?.method === 'cash' ? row(`Gratuity (${tip.percent}%), cash to driver`, money(tip.amount), { top: true }) : ''}
 </table>`;
 };
+
+// the customer's gratuity choices, shown before they reach the payment page
+const gratuityChoices = (q) => gratuityOptions(q).map((o) => `${o.percent}% ${money(o.amount)}`).join(' · ');
+const CARD_HOLD_NOTE = 'Paying by card? Your card is kept on file until 48 hours after your trip, '
+  + 'for any damage or cleaning charges, then removed.';
+
+const GRATUITY_HOW = 'Choose at checkout and add it to your online payment, or pay it in cash to your driver. '
+  + 'With a deposit, a gratuity added online is collected with the balance.';
+
+const gratuityChoice = (q) => `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
+  <tr><td class="tr-cell" style="padding:12px 16px 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                                 color:${BRAND.muted};font-family:${FONT};">Gratuity, your choice</td></tr>
+  <tr><td class="tr-cell" style="padding:4px 16px;font-size:15px;font-weight:700;color:${BRAND.text};font-family:${FONT};">${esc(gratuityChoices(q))}</td></tr>
+  <tr><td class="tr-cell" style="padding:4px 16px 14px;font-size:13px;line-height:1.55;color:${BRAND.muted};font-family:${FONT};">${esc(GRATUITY_HOW)}</td></tr>
+</table>`;
 
 // what the customer quotes back to us; older bookings may only have the database id
 const refOf = (q) => q.reservationNumber || String(q._id);
@@ -422,10 +447,11 @@ const pct = (rate) => `${(rate * 100).toFixed(rate * 100 % 1 ? 2 : 0)}%`;
 
 // Methods grouped by the fee they attract, highest first. Read from the same
 // settings the payment page charges by, so the email never disagrees with it.
-function feeTiers() {
+function feeTiers({ noCash = false } = {}) {
   const tiers = new Map();
   ALL_METHODS
     .filter((m) => paypalConfigured() || !PAYPAL_METHODS.includes(m))
+    .filter((m) => !(noCash && m === 'cash'))
     .forEach((m) => {
       const rate = processingFeeRate(m);
       tiers.set(rate, [...(tiers.get(rate) || []), methodName(m)]);
@@ -442,12 +468,12 @@ const paymentMethodsText = () => 'Ways to pay (any fee is added at checkout):\n'
   + feeTiers().map((t) => `- ${t.names}: ${t.fee}`).join('\n');
 
 // what each method adds, so the surcharge is no surprise at checkout
-const paymentMethods = ({ cashFullOnly = false } = {}) => `
+const paymentMethods = ({ cashFullOnly = false, noCash = false } = {}) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr><td colspan="2" class="tr-cell" style="padding:12px 16px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                              color:${BRAND.muted};font-family:${FONT};">Ways to pay</td></tr>
-  ${feeTiers().map((t) => `
+  ${feeTiers({ noCash }).map((t) => `
   <tr>
     <td class="tr-cell" style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};
                border-top:1px solid ${BRAND.line};">${esc(t.names)}</td>
@@ -465,6 +491,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const offer = quote.kind === 'open';
   const vehicleName = quote.vehicle?.name || 'A vehicle';
   const depositPct = pct(quoteDepositRate(quote));
+  const chooses = !!quote.gratuity?.customerChooses;
   await sendMail({
     from: FROM(),
     to: [quote.customer.email],
@@ -473,12 +500,13 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
       + (offer
         ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${money(quote.quotedAmount)}.\n`
         : `We can cover this trip for ${money(quote.quotedAmount)}.\n`)
+      + (chooses ? `Gratuity, your choice: ${gratuityChoices(quote)}. ${GRATUITY_HOW}\n\n` : '')
       + (depositAmount
         ? `Pay in full today or secure your booking with a ${depositPct} deposit of ${money(depositAmount)}.\n\n`
           + `Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
           + 'will be automatically charged to the same card on arrival of the vehicle.\n\n'
         : 'Payment in full confirms your booking.\n\n')
-      + `${paymentMethodsText()}\n\n`
+      + `${paymentMethodsText()}\n${CARD_HOLD_NOTE}\n\n`
       + `Complete your booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
     html: shell({
       heading: offer ? 'A vehicle is available' : 'Your quote is ready',
@@ -491,8 +519,9 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
           ? para("Good news: we found a vehicle for your trip. If you'd like to go ahead at this price, complete your booking below.")
             + vehicleCard(quote.vehicle)
           : para('Thanks for your request — we can cover this trip.'))
-        + amountPanel('Total quote', money(quote.quotedAmount))
+        + amountPanel(chooses ? 'Total before gratuity' : 'Total quote', money(quote.quotedAmount))
         + invoiceTable(quote)
+        + (chooses ? gratuityChoice(quote) : '')
         + detailRows(tripRows(quote))
         + (depositAmount
           ? para(`Pay in full today or secure your booking with a <strong>${depositPct} deposit of ${money(depositAmount)}</strong>.`)
@@ -500,6 +529,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
               + 'will be automatically charged to the same card on arrival of the vehicle.')
           : para('Payment in full confirms your booking.'))
         + paymentMethods({ cashFullOnly: !!depositAmount })
+        + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(CARD_HOLD_NOTE)}</span>`)
         + button(paymentUrl, 'Complete your booking')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you and expires in ${esc(ttl)} days. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),
@@ -557,11 +587,13 @@ function balanceLine(quote, isDeposit) {
 function balanceSentence(plan, { html = true } = {}) {
   const b = (text) => (html ? `<strong>${text}</strong>` : text);
   if (plan.how === 'card') {
-    return `The balance of ${b(money(plan.amount))}${plan.fee ? ` (including the ${pct(plan.rate)} processing fee)` : ''} `
+    const incl = [plan.tip ? 'your gratuity' : '', plan.fee ? `the ${pct(plan.rate)} processing fee` : ''].filter(Boolean).join(' and ');
+    return `The balance of ${b(money(plan.amount))}${incl ? ` (including ${incl})` : ''} `
       + `will be charged to the same card automatically on ${b('arrival of your vehicle')}. Nothing more to do.`;
   }
-  if (plan.how === 'zelle') return `Balance of ${b(money(plan.amount))} is due via Zelle on ${b('arrival of the vehicle')}.`;
-  return `We'll email you a payment link for the remaining ${b(money(plan.amount))} on the morning of your trip.`;
+  const withTip = plan.tip ? ' (including your gratuity)' : '';
+  if (plan.how === 'zelle') return `Balance of ${b(money(plan.amount))}${withTip} is due via Zelle on ${b('arrival of the vehicle')}.`;
+  return `We'll email you a payment link for the remaining ${b(money(plan.amount))}${withTip} on the morning of your trip.`;
 }
 
 const balanceNote = (plan) => ({
@@ -603,12 +635,17 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
         + invoiceTable(quote)
         + detailRows([
           ...tripRows(quote),
-          ['Total', money(quote.quotedAmount)],
+          ['Total', money(bookingTotal(quote))],
           quote.paymentMethod ? ['Paid with', methodName(quote.paymentMethod)] : null,
+          quote.gratuity?.method ? ['Gratuity', gratuityLabel(quote.gratuity)] : null,
           isDeposit ? ['Balance remaining', money(plan.amount)] : null,
           refRow(quote),
         ])
         + para(balanceLine(quote, isDeposit))
+        + (quote.squareCardId && quote.cardReleaseAt
+          ? para(`<span style="font-size:13px;color:${BRAND.muted};">Your card is kept on file until `
+            + `${esc(formatInZone(new Date(quote.cardReleaseAt)))} for any damage or cleaning charges, then removed.</span>`)
+          : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">We'll be in touch before pickup with your driver's details.</span>`),
     }),
   });
@@ -655,6 +692,7 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
           ...tripRows(quote),
+          quote.gratuity?.method ? ['Gratuity', gratuityLabel(quote.gratuity)] : null,
           refRow(quote),
         ])
         + para('<span style="font-size:13px;color:' + BRAND.muted + '">Attached: Itinerary with no pricing, customer\'s invoice and a calendar invite.</span>'),
@@ -820,19 +858,25 @@ const zelleQr = (quote, name) => (site()
 </table>`
   : '');
 
-async function sendOfflineInstructions(quote, amount, method, isDeposit) {
+async function sendOfflineInstructions(quote, amount, method, isDeposit, { charge = null } = {}) {
   const { instructionsFor, zelleRecipient } = require('../controllers/offline.controller.js');
   const how = instructionsFor(method, quote);
   const zelle = method === 'zelle' ? zelleRecipient() : null;
   const plan = balancePlan(quote);
   const label = method === 'zelle' ? 'Zelle' : 'cash';
   const c = quote.customer;
+  const chargeName = charge ? `${chargeKind(charge).toLowerCase()} charge` : '';
+  const intro = charge
+    ? `Here is how to pay the ${chargeName} on your booking (${charge.description}).`
+    : 'Your booking is held for you. Here is what is due and how to send it.';
 
   await sendMail({
     from: FROM(),
     to: [c.email],
-    subject: `How to pay for your Tour Rider booking — ${money(amount)} by ${label}`,
-    text: `Hello ${c.name},\n\nYour booking is held for you. ${money(amount)} is due by ${label}.\n\n${how}\n\n`
+    subject: charge
+      ? `How to pay your ${chargeName} — ${money(amount)} by ${label}`
+      : `How to pay for your Tour Rider booking — ${money(amount)} by ${label}`,
+    text: `Hello ${c.name},\n\n${charge ? intro : 'Your booking is held for you.'} ${money(amount)} is due by ${label}.\n\n${how}\n\n`
       + `There is no processing fee on ${label}.\n`
       + (isDeposit ? `${balanceSentence(plan, { html: false })}\n` : ''),
     html: shell({
@@ -840,7 +884,7 @@ async function sendOfflineInstructions(quote, amount, method, isDeposit) {
       preheader: `${money(amount)} due by ${esc(label)} to confirm your booking`,
       body:
         para(`Hello ${esc(c.name)},`)
-        + para('Your booking is held for you. Here is what is due and how to send it.')
+        + para(esc(intro))
         + amountPanel(isDeposit ? 'Deposit due' : 'Amount due', money(amount), `No processing fee on ${esc(label)}`)
         + (zelle
           ? para('<strong>Send your payment by Zelle using these details:</strong>')
@@ -851,12 +895,86 @@ async function sendOfflineInstructions(quote, amount, method, isDeposit) {
             ])
             // a company name the customer has never heard of would look like a mistake
             + para(`<span style="font-size:13px;color:${BRAND.muted};">${esc(zelle.name)} is Tour Rider's parent company, `
-              + 'so that is the name Zelle will show when you send. Your booking is held until the payment arrives.</span>')
+              + `so that is the name Zelle will show when you send.${charge ? '' : ' Your booking is held until the payment arrives.'}</span>`)
             + zelleQr(quote, zelle.name)
           : para(`<strong>${esc(how)}</strong>`))
         + detailRows(tripRows(quote))
         + (isDeposit ? para(balanceSentence(plan)) : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">We'll confirm by email as soon as the payment reaches us.</span>`),
+    }),
+  });
+}
+
+const CHARGE_KINDS = { damage: 'Damage', cleaning: 'Cleaning', other: 'Additional' };
+const chargeKind = (charge) => CHARGE_KINDS[charge.kind] || 'Additional';
+
+/**
+ * The invoice for a charge added after the trip, kept apart from the booking's own.
+ * Sent when the card on file is charged, when payment is due by link, and once paid.
+ */
+async function sendExtraCharge(quote, charge, paymentUrl = null) {
+  const c = quote.customer;
+  const name = `${chargeKind(charge).toLowerCase()} charge`;
+  const onCard = charge.status === 'charged';
+  const settled = charge.status !== 'awaiting_payment';
+  const fee = Number(charge.fee) || 0;
+  const total = settled ? Number(charge.total) : Number(charge.amount);
+  const ref = refOf(quote);
+
+  const attachments = (await Promise.all([
+    attach('charge invoice PDF', `invoice-${ref}-${charge.kind}.pdf`, 'application/pdf',
+      () => buildChargeInvoicePDF(quote, charge)),
+  ])).filter(Boolean);
+
+  const subject = onCard ? `${chargeKind(charge)} charge for your Tour Rider trip — ${ref}`
+    : settled ? `Payment received: ${name} — ${ref}`
+      : `Payment due: ${name} for your Tour Rider trip — ${ref}`;
+  const intro = onCard
+    ? `After your trip on ${quote.date}, a ${name} was added to your booking and charged to the card you paid with.`
+    : settled ? `Thank you, we've received your payment for the ${name} on your booking.`
+      : `After your trip on ${quote.date}, a ${name} was added to your booking. Please pay it using the link below.`;
+  const rows = [
+    ['Charge', chargeKind(charge)],
+    ['Description', charge.description],
+    ['Amount', money(charge.amount)],
+    fee ? [`Processing fee (${pct(charge.feeRate)})`, money(fee)] : null,
+    settled ? ['Total', money(total)] : null,
+    settled && charge.method ? ['Paid with', methodName(charge.method)] : null,
+  ];
+  const help = 'Questions about this charge? Reply to this email or call 917-822-2713.';
+
+  await sendMail({
+    from: FROM(),
+    to: [c.email],
+    bcc: adminRecipients(),
+    attachments,
+    subject,
+    text: `Hello ${c.name},\n\n${intro}\n\n`
+      + rows.filter(Boolean).map(([k, v]) => `${k}: ${v}`).join('\n')
+      + `\nReservation: ${ref}\n\n`
+      + (paymentUrl ? `Pay now: ${paymentUrl}\n\n` : '')
+      + help,
+    html: shell({
+      heading: settled && !onCard ? 'Additional charge paid' : 'Additional charge',
+      accent: settled ? BRAND.good : BRAND.gold,
+      preheader: `${chargeKind(charge)}: ${money(total)} — ${ref}`,
+      body:
+        para(`Hello ${esc(c.name)},`)
+        + para(esc(intro))
+        + amountPanel(
+          onCard ? 'Charged to your card' : settled ? 'Paid' : 'Amount due',
+          money(total),
+          onCard && fee ? `Includes ${money(fee)} processing fee` : settled ? '' : 'Plus the processing fee for the method you choose',
+        )
+        + detailRows(rows)
+        + detailRows(tripRows(quote))
+        + (paymentUrl
+          ? paymentMethods({ noCash: true })
+            + button(paymentUrl, 'Pay now')
+            + para(`<span style="font-size:12px;color:${BRAND.muted};">If the button doesn't work, paste this into your browser:<br>`
+              + `<span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`)
+          : '')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">${esc(help)}</span>`),
     }),
   });
 }
@@ -910,5 +1028,6 @@ module.exports = {
   sendBalanceLink,
   sendAdminBalanceLinkSent,
   sendOfflineInstructions,
+  sendExtraCharge,
   sendAdminOfflineChosen,
 };

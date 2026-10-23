@@ -3,6 +3,7 @@ const Quote = require('../models/quote.model.js');
 const email = require('../services/emailService.js');
 const { OFFLINE_METHODS, methodLabel } = require('../helpers/paymentMethods.js');
 const { resolvePayable } = require('../services/payments.js');
+const { bookingTotal } = require('../helpers/gratuity.js');
 const { round2 } = require('../helpers/pricing.js');
 
 /**
@@ -27,11 +28,33 @@ const chooseOffline = async (req, res) => {
       return res.status(400).json({ success: false, error: err.message });
     }
 
-    const payable = await resolvePayable(token, paymentOption, method);
+    const payable = await resolvePayable(token, paymentOption, method, req.body);
     if (payable.error) {
       return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    const { quote, mode, amount, remaining, isDeposit } = payable;
+    const { quote, mode, amount, remaining, isDeposit, gratuity } = payable;
+
+    // an extra charge settled by Zelle is recorded on the charge; the admin confirms it arrived
+    if (mode === 'charge') {
+      if (method === 'cash') {
+        return res.status(400).json({ success: false, error: 'Please pay this charge by Zelle or card.' });
+      }
+      const charge = quote.extraCharges.id(payable.chargeId);
+      charge.method = method;
+      charge.offlineChosenAt = new Date();
+      await quote.save();
+      email.sendOfflineInstructions(quote, amount, method, false, { charge })
+        .catch((e) => console.error('offline instructions email failed:', e.message));
+      email.sendAdminOfflineChosen(quote, amount, method)
+        .catch((e) => console.error('admin offline notice failed:', e.message));
+      return res.json({
+        success: true,
+        method: methodLabel(method),
+        amountDue: round2(amount),
+        remainingBalance: 0,
+        instructions: instructionsFor(method, quote),
+      });
+    }
 
     // cash cannot hold a date, so it only settles a booking outright
     if (method === 'cash' && mode === 'initial' && isDeposit) {
@@ -51,6 +74,7 @@ const chooseOffline = async (req, res) => {
       quote.remainingBalance = remaining;
       quote.processingFee = 0;
       quote.processingFeeRate = 0;
+      if (gratuity) Object.assign(quote.gratuity, gratuity);
     }
     quote.offlineChosenAt = new Date();
     await quote.save();
@@ -111,7 +135,8 @@ const confirmOffline = async (req, res) => {
       quote.balanceMethod = quote.balanceMethod || quote.paymentMethod;
       quote.amountPaid = round2(Number(quote.amountPaid || 0) + Number(quote.remainingBalance));
     } else {
-      const total = round2(quote.quotedAmount);
+      // gratuity added online is part of what is owed, and of the balance after a deposit
+      const total = bookingTotal(quote);
       const due = quote.paymentOption === 'deposit' ? round2(total - Number(quote.remainingBalance)) : total;
       quote.status = 'paid';
       quote.amountPaid = due;
@@ -138,4 +163,29 @@ const confirmOffline = async (req, res) => {
   }
 };
 
-module.exports = { chooseOffline, confirmOffline, instructionsFor, zelleRecipient };
+/** Admin confirmation that a Zelle payment for an extra charge arrived. */
+const confirmChargeOffline = async (req, res) => {
+  try {
+    const quote = await Quote.findById(req.params.id);
+    const charge = quote?.extraCharges?.id(req.params.chargeId);
+    if (!charge) return res.status(404).json({ error: 'Charge not found' });
+    if (charge.status !== 'awaiting_payment') return res.status(409).json({ error: 'This charge is already settled' });
+    if (!charge.offlineChosenAt) return res.status(409).json({ error: 'This charge was not set to be paid by Zelle' });
+
+    Object.assign(charge, {
+      status: 'paid', fee: 0, feeRate: 0, total: round2(charge.amount), paidAt: new Date(),
+      tokenHash: undefined, tokenExpires: undefined,
+    });
+    await quote.save();
+
+    email.sendExtraCharge(quote, charge).catch((e) => console.error('extra charge receipt failed:', e.message));
+    return res.json({ success: true, total: charge.total });
+  } catch (err) {
+    console.error('confirmChargeOffline error:', err);
+    return res.status(500).json({ error: 'Could not confirm this payment' });
+  }
+};
+
+module.exports = {
+  chooseOffline, confirmOffline, confirmChargeOffline, instructionsFor, zelleRecipient,
+};

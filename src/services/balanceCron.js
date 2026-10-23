@@ -5,6 +5,7 @@ const { createPaymentViaRest } = require('../controllers/payment.controller.js')
 const { zonedDayRange } = require('../helpers/datetime.js');
 const { newToken, hashToken, tokenTtlDays } = require('../helpers/tokens.js');
 const { balancePlan } = require('../helpers/paymentMethods.js');
+const { cardReleaseAt } = require('./payments.js');
 
 // the card on file is charged this long after the booked pickup time
 const ARRIVAL_GRACE_MINUTES = 15;
@@ -29,6 +30,45 @@ const squareError = (err) =>
  */
 // an attempt older than this is assumed dead (process crashed mid-charge)
 const CLAIM_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Charges the card saved on a booking, falling back to the REST API when the SDK
+ * call fails. Returns { payment } or { error } with Square's reason; never throws.
+ */
+async function chargeSavedCard(quote, amount, idempotencyKey, label = 'card') {
+  let sdkErr = null;
+  let lastErr = null;
+
+  if (client?.payments?.create) {
+    try {
+      const response = await client.payments.create({
+        sourceId: quote.squareCardId,
+        idempotencyKey,
+        amountMoney: { amount: BigInt(Math.round(amount * 100)), currency: 'USD' },
+        customerId: quote.squareCustomerId,
+      });
+      return { payment: response?.result?.payment || response?.payment || response };
+    } catch (err) {
+      sdkErr = err;
+      lastErr = err;
+      console.error(`${label} SDK charge failed for ${quote._id}:`, squareError(err));
+    }
+  }
+
+  try {
+    const restResp = await createPaymentViaRest({
+      amount,
+      sourceId: quote.squareCardId,
+      idempotencyKey,
+      customerId: quote.squareCustomerId,
+    });
+    return { payment: restResp.payment || restResp };
+  } catch (restErr) {
+    lastErr = restErr;
+  }
+  // the SDK error describes the card; a REST fallback error usually describes transport
+  return { error: squareError(sdkErr || lastErr) };
+}
 
 async function chargeBalanceFor(quoteId) {
   const staleBefore = new Date(Date.now() - CLAIM_TTL_MS);
@@ -75,43 +115,9 @@ async function chargeBalanceFor(quoteId) {
   // the balance carries the same card surcharge the deposit did
   const { amount, fee, rate } = balancePlan(quote);
   const idempotencyKey = balanceIdempotencyKey(quote);
-  let payment = null;
-  let sdkErr = null;
-  let lastErr = null;
-
-  if (client?.payments?.create) {
-    try {
-      const response = await client.payments.create({
-        sourceId: quote.squareCardId,
-        idempotencyKey,
-        amountMoney: { amount: BigInt(Math.round(amount * 100)), currency: 'USD' },
-        customerId: quote.squareCustomerId,
-      });
-      payment = response?.result?.payment || response?.payment || response;
-    } catch (err) {
-      sdkErr = err;
-      lastErr = err;
-      console.error(`balance SDK charge failed for ${quote._id}:`, squareError(err));
-    }
-  }
+  const { payment, error: reason } = await chargeSavedCard(quote, amount, idempotencyKey, 'balance');
 
   if (!payment) {
-    try {
-      const restResp = await createPaymentViaRest({
-        amount,
-        sourceId: quote.squareCardId,
-        idempotencyKey,
-        customerId: quote.squareCustomerId,
-      });
-      payment = restResp.payment || restResp;
-    } catch (restErr) {
-      lastErr = restErr;
-    }
-  }
-
-  if (!payment) {
-    // the SDK error describes the card; a REST fallback error usually describes transport
-    const reason = squareError(sdkErr || lastErr);
     console.error(`balance charge failed for ${quote._id}: ${reason}`);
 
     // release the claim so a manual retry is possible; the stable idempotency
@@ -246,6 +252,45 @@ async function sendDueBalanceLinks() {
   return { linkable: byLink.length, linked };
 }
 
+/**
+ * Cards are kept for a short while after the trip for damage or cleaning charges,
+ * then removed from Square. A balance still owed keeps its card until it is settled.
+ */
+async function releaseExpiredCards(now = new Date()) {
+  // cards saved before removal times existed get one now, by the same rule as new bookings
+  const undated = await Quote.find({ squareCardId: { $exists: true, $ne: null }, cardReleaseAt: null })
+    .select('_id date pickupTime finalDropoffTime pickupDateTime');
+  for (const q of undated) {
+    const at = cardReleaseAt(q);
+    if (Number.isNaN(at.getTime())) continue;
+    await Quote.updateOne({ _id: q._id }, { $set: { cardReleaseAt: at } });
+  }
+
+  const due = await Quote.find({
+    squareCardId: { $exists: true, $ne: null },
+    cardReleaseAt: { $lte: now },
+    $or: [{ remainingBalancePaid: true }, { remainingBalance: { $lte: 0 } }],
+  }).select('_id squareCardId');
+
+  let released = 0;
+  for (const { _id, squareCardId } of due) {
+    try {
+      await client.cards.disable({ cardId: squareCardId });
+    } catch (err) {
+      // a card Square no longer has is as good as removed; anything else is retried next run
+      const reason = squareError(err);
+      if (!/not found|disabled/i.test(reason)) {
+        console.error(`could not remove saved card for ${_id}: ${reason}`);
+        continue;
+      }
+    }
+    await Quote.updateOne({ _id }, { $unset: { squareCardId: '' } });
+    released += 1;
+  }
+  return { dated: undated.length, due: due.length, released };
+}
+
 module.exports = {
   chargeArrivedBalances, sendDueBalanceLinks, chargeBalanceFor, sendBalanceLinkFor, balanceIdempotencyKey,
+  chargeSavedCard, releaseExpiredCards,
 };

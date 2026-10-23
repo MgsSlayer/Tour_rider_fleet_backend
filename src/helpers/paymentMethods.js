@@ -1,4 +1,5 @@
 const { round2 } = require('./pricing.js');
+const { onlineGratuity } = require('./gratuity.js');
 
 // Square tokenises all of these to the same Payments API source id.
 const SQUARE_METHODS = ['card', 'apple_pay', 'google_pay', 'cash_app'];
@@ -39,13 +40,15 @@ function processingFeeRate(method) {
  */
 function balancePlan(quote) {
   const base = round2(Number(quote.remainingBalance) || 0);
+  // after a deposit, gratuity added online travels with the balance
+  const tip = quote.paymentOption === 'deposit' ? onlineGratuity(quote) : 0;
   if (quote.squareCardId) {
     const stored = Number(quote.processingFeeRate);
     const rate = quote.paymentMethod === 'card' && Number.isFinite(stored) ? stored : processingFeeRate('card');
     const fee = round2(base * rate);
-    return { how: 'card', base, rate, fee, amount: round2(base + fee) };
+    return { how: 'card', base, rate, fee, tip, amount: round2(base + fee) };
   }
-  return { how: quote.paymentMethod === 'zelle' ? 'zelle' : 'link', base, rate: 0, fee: 0, amount: base };
+  return { how: quote.paymentMethod === 'zelle' ? 'zelle' : 'link', base, rate: 0, fee: 0, tip, amount: base };
 }
 
 const LABELS = {

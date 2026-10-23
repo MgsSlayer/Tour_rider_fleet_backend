@@ -90,19 +90,19 @@ const payQuote = async (req, res) => {
       return res.status(400).json({ success: false, error: err.message });
     }
 
-    const payable = await resolvePayable(token, paymentOption, method);
+    const payable = await resolvePayable(token, paymentOption, method, req.body);
     if (payable.error) {
       return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    const { quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit } = payable;
+    const { quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId } = payable;
 
     const idempotencyKey = newIdempotencyKey();
     let customerId = null;
     let cardId = null;
 
-    // a card deposit always keeps the card so the balance can be charged on arrival;
-    // wallets cannot be kept, so their balance is asked for by link instead
-    if (mode === 'initial' && isDeposit && canStoreCard(method)) {
+    // a card is kept for the balance on arrival and, for a short while after the trip,
+    // for damage or cleaning charges; wallets cannot be kept, so they are asked for by link
+    if (mode === 'initial' && canStoreCard(method)) {
       try {
         customerId = await getOrCreateSquareCustomer(quote.customer);
         const cardRes = await client.cards.create({
@@ -149,7 +149,7 @@ const payQuote = async (req, res) => {
     }
 
     const result = await applyPayment(quote, {
-      mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit,
+      mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId,
       paymentId: payment?.id || null, customerId, cardId,
     });
     return res.json(result);

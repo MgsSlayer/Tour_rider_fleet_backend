@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const dbconnect = require('./src/config/dbconnect.js');
-const { chargeArrivedBalances, sendDueBalanceLinks } = require('./src/services/balanceCron.js');
+const { chargeArrivedBalances, sendDueBalanceLinks, releaseExpiredCards } = require('./src/services/balanceCron.js');
 const { useResend } = require('./src/services/emailService.js');
 
 const app = express();
@@ -65,6 +65,11 @@ dbconnect()
     // saved cards are charged 15 minutes after pickup; checked every 5 minutes
     cron.schedule('*/5 * * * *', () => {
       chargeArrivedBalances().catch((e) => console.error('arrival charge cron failed:', e.message));
+    });
+
+    // saved cards are removed 48 hours after the trip; checked hourly
+    cron.schedule('20 * * * *', () => {
+      releaseExpiredCards().catch((e) => console.error('card release cron failed:', e.message));
     });
 
     // balance links for deposits with no card behind them, every morning at 08:00 server time

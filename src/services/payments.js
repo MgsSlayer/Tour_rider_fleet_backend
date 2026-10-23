@@ -7,6 +7,49 @@ const email = require('./emailService.js');
 const { round2 } = require('../helpers/pricing.js');
 const { hashToken, quoteDepositRate } = require('../helpers/tokens.js');
 const { methodLabel, processingFeeRate, isOffline } = require('../helpers/paymentMethods.js');
+const { GRATUITY_PERCENTS, gratuityAmount } = require('../helpers/gratuity.js');
+const { tripMinutes } = require('../helpers/datetime.js');
+
+// a saved card stays on file this long after the scheduled drop-off, for damage or cleaning charges
+const CARD_HOLD_HOURS = 48;
+
+function cardReleaseAt(quote) {
+  const minutes = tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime) || 0;
+  const dropoff = new Date(quote.pickupDateTime).getTime() + minutes * 60 * 1000;
+  return new Date(dropoff + CARD_HOLD_HOURS * 60 * 60 * 1000);
+}
+
+// a link mailed for an extra charge (damage, cleaning…) settles that charge and nothing else
+async function resolveChargePayable(hash, method) {
+  const quote = await Quote.findOne({ 'extraCharges.tokenHash': hash });
+  const charge = quote?.extraCharges?.find((c) => c.tokenHash === hash);
+  if (!charge) return { error: { status: 404, message: 'This link is not valid' } };
+  if (charge.tokenExpires && charge.tokenExpires < new Date()) {
+    return { error: { status: 410, message: 'This link has expired. Contact us and we will send a new one.' } };
+  }
+  if (charge.status !== 'awaiting_payment') {
+    return { error: { status: 409, message: 'This charge has already been paid' } };
+  }
+  return {
+    quote, mode: 'charge', chargeId: charge._id, ...priced(round2(charge.amount), method), remaining: 0, isDeposit: false,
+  };
+}
+
+/**
+ * The customer's gratuity pick, honoured only when the admin left it to them.
+ * Returns { gratuity } (null when there is no choice to make) or { error }.
+ */
+function readGratuity(quote, input = {}) {
+  if (!quote.gratuity?.customerChooses) return { gratuity: null };
+  const percent = Number(input.gratuityPercent);
+  if (!GRATUITY_PERCENTS.includes(percent)) {
+    return { error: { status: 400, message: 'Choose a gratuity of 10%, 15% or 20%.' } };
+  }
+  if (!['online', 'cash'].includes(input.gratuityMethod)) {
+    return { error: { status: 400, message: 'Choose whether to add the gratuity online or pay it in cash.' } };
+  }
+  return { gratuity: { percent, amount: gratuityAmount(quote, percent), method: input.gratuityMethod } };
+}
 
 /**
  * Resolves a raw payment token to the quote and the exact sum due.
@@ -17,9 +60,9 @@ const { methodLabel, processingFeeRate, isOffline } = require('../helpers/paymen
  *
  * Returns { error } instead of throwing so callers can map it to a status code.
  */
-async function resolvePayable(rawToken, paymentOption, method = 'card') {
+async function resolvePayable(rawToken, paymentOption, method = 'card', gratuityInput = {}) {
   const quote = await Quote.findOne({ paymentTokenHash: hashToken(rawToken) });
-  if (!quote) return { error: { status: 404, message: 'This link is not valid' } };
+  if (!quote) return resolveChargePayable(hashToken(rawToken), method);
 
   if (quote.paymentTokenExpires && quote.paymentTokenExpires < new Date()) {
     return { error: { status: 410, message: 'This link has expired. Contact us and we will send a new one.' } };
@@ -53,14 +96,20 @@ async function resolvePayable(rawToken, paymentOption, method = 'card') {
   if (paymentOption === 'deposit' && rate >= 1) {
     return { error: { status: 400, message: 'This booking is paid in full. Please choose "Pay in full".' } };
   }
+  const picked = readGratuity(quote, gratuityInput);
+  if (picked.error) return { error: picked.error };
+  const tip = picked.gratuity?.method === 'online' ? picked.gratuity.amount : 0;
+
   const isDeposit = paymentOption === 'deposit';
-  const subtotal = isDeposit ? round2(total * rate) : total;
+  // the deposit never carries gratuity; added online, the whole of it goes with the balance
+  const subtotal = isDeposit ? round2(total * rate) : round2(total + tip);
   return {
     quote,
     mode: 'initial',
     ...priced(subtotal, method),
-    remaining: isDeposit ? round2(total - subtotal) : 0,
+    remaining: isDeposit ? round2(total - subtotal + tip) : 0,
     isDeposit,
+    gratuity: picked.gratuity,
   };
 }
 
@@ -78,8 +127,10 @@ function priced(subtotal, method) {
 async function applyPayment(quote, ctx) {
   const {
     mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit,
-    paymentId, customerId = null, cardId = null, paypal = null,
+    paymentId, customerId = null, cardId = null, paypal = null, gratuity = null,
   } = ctx;
+
+  if (mode === 'charge') return applyChargePayment(quote, ctx);
 
   if (mode === 'balance') {
     quote.remainingBalancePaid = true;
@@ -103,6 +154,8 @@ async function applyPayment(quote, ctx) {
     quote.remainingBalancePaid = !isDeposit;
     quote.squareCustomerId = customerId;
     quote.squareCardId = cardId;
+    if (cardId) quote.cardReleaseAt = cardReleaseAt(quote);
+    if (gratuity) Object.assign(quote.gratuity, gratuity);
   }
 
   if (paypal) {
@@ -134,4 +187,38 @@ async function applyPayment(quote, ctx) {
   };
 }
 
-module.exports = { resolvePayable, applyPayment };
+/** Marks an extra charge paid through its link and sends the paid invoice. */
+async function applyChargePayment(quote, ctx) {
+  const {
+    chargeId, method, amount, subtotal, fee, feeRate, paymentId, paypal = null,
+  } = ctx;
+  const charge = quote.extraCharges.id(chargeId);
+  Object.assign(charge, {
+    status: 'paid',
+    method,
+    feeRate,
+    fee,
+    total: amount,
+    paymentId: paymentId || paypal?.captureId || null,
+    paidAt: new Date(),
+    tokenHash: undefined,
+    tokenExpires: undefined,
+  });
+  await quote.save();
+
+  email.sendExtraCharge(quote, charge).catch((e) => console.error('extra charge receipt failed:', e.message));
+  return {
+    success: true,
+    amountPaid: amount,
+    subtotal,
+    processingFee: fee,
+    processingFeeRate: feeRate,
+    remainingBalance: 0,
+    method: methodLabel(method),
+    extraCharge: true,
+  };
+}
+
+module.exports = {
+  resolvePayable, applyPayment, readGratuity, cardReleaseAt, CARD_HOLD_HOURS,
+};

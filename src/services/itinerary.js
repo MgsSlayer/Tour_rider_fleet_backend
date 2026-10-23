@@ -8,6 +8,7 @@ const { formatInZone, zonedToUtc } = require('../helpers/datetime.js');
 const { round2 } = require('../helpers/pricing.js');
 const { balancePlan } = require('../helpers/paymentMethods.js');
 const { stopRows } = require('../helpers/stops.js');
+const { bookingTotal } = require('../helpers/gratuity.js');
 
 const METHOD_LABELS = {
   card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App Pay',
@@ -54,6 +55,10 @@ function itineraryRows(quote) {
   rows.push(['Drop-off address', quote.dropoffAddress]);
   rows.push(['Final drop-off', `${quote.finalDropoffTime} (${quote.date})`]);
   if (quote.message) rows.push(['Customer note', quote.message]);
+  // the driver needs to know whether a tip is coming, never how much
+  if (quote.gratuity?.method) {
+    rows.push(['Gratuity', quote.gratuity.method === 'online' ? 'Paid online' : 'Customer pays the driver in cash']);
+  }
   return rows;
 }
 
@@ -186,7 +191,10 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     section('Charges');
     row('Base fare', money(quote.baseFare ?? quote.quotedAmount));
     (quote.lineItems || []).forEach((l) => row(l.label, money(l.amount)));
-    row('Total', money(quote.quotedAmount), { strong: true });
+    const tip = quote.gratuity?.method ? quote.gratuity : null;
+    if (tip?.method === 'online') row(`Gratuity (${tip.percent}%)`, money(tip.amount));
+    row('Total', money(bookingTotal(quote)), { strong: true });
+    if (tip?.method === 'cash') row(`Gratuity (${tip.percent}%), cash to driver`, money(tip.amount));
     y += 10;
 
     section('Payment');
@@ -221,6 +229,71 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     }
 
     drawFooter(doc, left, right, 'Thank you for choosing Tour Rider.');
+    doc.end();
+  });
+}
+
+const CHARGE_LABELS = { damage: 'Damage', cleaning: 'Cleaning', other: 'Additional charge' };
+
+/** A charge added after the trip, on an invoice of its own. Resolves to a PDF Buffer. */
+function buildChargeInvoicePDF(quote, charge) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const { left, right } = drawHeader(doc, quote, 'INVOICE');
+    let y = 136;
+
+    doc.fillColor(INK).fontSize(16).font('Helvetica-Bold').text(quote.customer?.name || 'Customer', left, y);
+    y += 20;
+    doc.fillColor(MUTED).fontSize(9).font('Helvetica')
+      .text([quote.customer?.email, quote.customer?.phone].filter(Boolean).join('  ·  '), left, y);
+    y += 26;
+
+    const row = (label, value, opts = {}) => {
+      const height = Math.max(doc.heightOfString(String(value), { width: 260 }), 12);
+      doc.fillColor(opts.strong ? INK : MUTED).fontSize(opts.strong ? 11 : 9.5)
+        .font(opts.strong ? 'Helvetica-Bold' : 'Helvetica')
+        .text(label, left, y, { width: right - left - 270 });
+      doc.fillColor(INK).fontSize(opts.strong ? 12 : 10).font(opts.strong ? 'Helvetica-Bold' : 'Helvetica')
+        .text(String(value), right - 260, y - 1, { width: 260, align: 'right' });
+      y += height + 8;
+      doc.moveTo(left, y - 3).lineTo(right, y - 3)
+        .lineWidth(opts.strong ? 1 : 0.5).strokeColor(opts.strong ? MUTED : LINE).stroke();
+      y += opts.strong ? 6 : 2;
+    };
+    const section = (title) => {
+      doc.fillColor(MUTED).fontSize(8).font('Helvetica-Bold').text(title.toUpperCase(), left, y, { characterSpacing: 1.2 });
+      y += 16;
+    };
+
+    section('Trip');
+    row('Vehicle', quote.vehicle?.name || quote.vehicle?.type || 'Assigned vehicle');
+    row('Pick-up', formatInZone(new Date(quote.pickupDateTime)));
+    row('Pick-up address', quote.pickupAddress);
+    row('Drop-off address', quote.dropoffAddress);
+    y += 10;
+
+    const settled = charge.status !== 'awaiting_payment';
+    const fee = Number(charge.fee) || 0;
+    section('Charge added after the trip');
+    row(CHARGE_LABELS[charge.kind] || 'Additional charge', charge.description);
+    row('Amount', money(charge.amount));
+    if (fee > 0) row(`Processing fee (${round2(Number(charge.feeRate) * 100)}%)`, money(fee));
+    row(settled ? 'Total paid' : 'Amount due', money(settled ? charge.total : charge.amount), { strong: true });
+
+    const method = METHOD_LABELS[charge.method] || null;
+    doc.fillColor(MUTED).fontSize(8.5).font('Helvetica').text(
+      charge.status === 'charged' ? 'Charged to the card on file.'
+        : settled ? `Paid${method ? ` by ${method}` : ''}.`
+          : 'Due. Pay with the link in the email that came with this invoice; any processing fee depends on the method used.',
+      left, y, { width: right - left },
+    );
+
+    drawFooter(doc, left, right, 'Questions about this charge? Call 917-822-2713 or reply to our email.');
     doc.end();
   });
 }
@@ -297,4 +370,6 @@ function buildCalendarInvite(quote) {
   return lines.join('\r\n');
 }
 
-module.exports = { buildItineraryPDF, buildInvoicePDF, buildCalendarInvite, contactLines, itineraryRows };
+module.exports = {
+  buildItineraryPDF, buildInvoicePDF, buildChargeInvoicePDF, buildCalendarInvite, contactLines, itineraryRows,
+};

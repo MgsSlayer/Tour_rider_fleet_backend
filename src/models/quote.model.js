@@ -38,6 +38,28 @@ const matchSchema = new mongoose.Schema({
   candidates: mongoose.Schema.Types.Mixed,
 }, { _id: false });
 
+// a charge added after the trip (damage, cleaning…), invoiced and paid on its own
+const extraChargeSchema = new mongoose.Schema({
+  kind: { type: String, enum: ['damage', 'cleaning', 'other'], required: true },
+  description: { type: String, required: true },
+  // before any processing fee
+  amount: { type: Number, required: true },
+  // charged: taken from the card on file; awaiting_payment: invoiced with a link; paid: settled through that link
+  status: { type: String, enum: ['charged', 'awaiting_payment', 'paid'], required: true },
+  method: String,
+  feeRate: Number,
+  fee: Number,
+  total: Number,
+  paymentId: String,
+  // why the card on file was not charged, when it fell back to a link
+  failureReason: String,
+  tokenHash: { type: String, index: true },
+  tokenExpires: Date,
+  offlineChosenAt: Date,
+  paidAt: Date,
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+
 const quoteSchema = new mongoose.Schema({
   // what the customer quotes back, e.g. in a Zelle memo; the database id means nothing to them
   reservationNumber: { type: String, unique: true, sparse: true },
@@ -108,6 +130,14 @@ const quoteSchema = new mongoose.Schema({
   quotedAmount: Number,
   // share of the total taken up front, set by the admin when sending; 1 means full payment only
   depositRate: { type: Number, min: 0.01, max: 1 },
+  // when the admin leaves gratuity to the customer, quotedAmount excludes it and the
+  // customer's pick lands here; `method` says whether it was paid online or in cash
+  gratuity: {
+    customerChooses: Boolean,
+    percent: Number,
+    amount: Number,
+    method: { type: String, enum: ['online', 'cash'] },
+  },
   declineReason: String,
   respondedAt: Date,
   respondedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -132,6 +162,9 @@ const quoteSchema = new mongoose.Schema({
 
   squareCustomerId: String,
   squareCardId: String,
+  // the saved card is removed from Square after this; until then it can cover damage or cleaning charges
+  cardReleaseAt: Date,
+  extraCharges: { type: [extraChargeSchema], default: undefined },
   remainingBalance: { type: Number, default: 0 },
   remainingBalancePaid: { type: Boolean, default: false },
   remainingBalancePaymentId: String,

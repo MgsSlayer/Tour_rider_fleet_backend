@@ -7,6 +7,7 @@ const { hashToken, newToken, depositRate, quoteDepositRate } = require('../helpe
 const { ALL_METHODS, processingFeeRate } = require('../helpers/paymentMethods.js');
 const { fetchFleet, matchFleet, VEHICLE_CATEGORIES, CITY_IDS } = require('../services/fleetService.js');
 const { MAX_STOPS, stopsOf } = require('../helpers/stops.js');
+const { DEFAULT_GRATUITY_PERCENT, gratuityOptions } = require('../helpers/gratuity.js');
 
 // the fleet does not take bookings shorter than this
 const MIN_TRIP_HOURS = 3;
@@ -42,6 +43,14 @@ const publicView = (q) => ({
   quotedAmount: q.quotedAmount,
   depositAmount: depositFor(q),
   depositPercent: Math.round(quoteDepositRate(q) * 100),
+  // null unless the admin left gratuity to the customer; percent/method once they have chosen
+  gratuity: q.gratuity?.customerChooses ? {
+    options: gratuityOptions(q),
+    defaultPercent: DEFAULT_GRATUITY_PERCENT,
+    percent: q.gratuity.percent,
+    amount: q.gratuity.amount,
+    method: q.gratuity.method,
+  } : null,
   amountPaid: q.amountPaid,
   remainingBalance: q.remainingBalance,
 });
@@ -252,6 +261,12 @@ const acceptQuote = async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
 
+    // the customer picks 10, 15 or 20% at checkout, so the admin's breakdown must not charge it too
+    const customerGratuity = req.body?.customerGratuity === true;
+    if (customerGratuity && priced.lineItems.some((l) => /gratuity/i.test(l.label))) {
+      return res.status(400).json({ error: 'Remove the Gratuity line: the customer chooses it at checkout.' });
+    }
+
     const quote = await Quote.findById(req.params.id);
     if (!quote) return res.status(404).json({ error: 'Request not found' });
     if (quote.status !== 'pending') {
@@ -273,6 +288,7 @@ const acceptQuote = async (req, res) => {
     quote.lineItems = priced.lineItems;
     quote.quotedAmount = priced.total;
     quote.depositRate = depositPercent / 100;
+    quote.gratuity = customerGratuity ? { customerChooses: true } : undefined;
     quote.paymentTokenHash = hashToken(rawToken);
     quote.paymentTokenExpires = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     quote.respondedAt = new Date();
@@ -336,7 +352,7 @@ const getQuoteByToken = async (req, res) => {
     if (!raw) return res.status(400).json({ error: 'Missing token' });
 
     const quote = await Quote.findOne({ paymentTokenHash: hashToken(raw) });
-    if (!quote) return res.status(404).json({ error: 'This link is not valid' });
+    if (!quote) return chargeByToken(raw, res);
     if (quote.paymentTokenExpires && quote.paymentTokenExpires < new Date()) {
       return res.status(410).json({ error: 'This link has expired. Contact us and we will send a new one.' });
     }
@@ -357,6 +373,54 @@ const getQuoteByToken = async (req, res) => {
   } catch (err) {
     console.error('getQuoteByToken error:', err);
     return res.status(500).json({ error: 'Could not load this quote' });
+  }
+};
+
+// a link mailed for an extra charge (damage, cleaning…) shows that charge alone
+async function chargeByToken(raw, res) {
+  const hash = hashToken(raw);
+  const quote = await Quote.findOne({ 'extraCharges.tokenHash': hash });
+  const charge = quote?.extraCharges?.find((c) => c.tokenHash === hash);
+  if (!charge) return res.status(404).json({ error: 'This link is not valid' });
+  if (charge.tokenExpires && charge.tokenExpires < new Date()) {
+    return res.status(410).json({ error: 'This link has expired. Contact us and we will send a new one.' });
+  }
+  if (charge.status !== 'awaiting_payment') {
+    return res.status(409).json({ error: 'This charge has already been paid.' });
+  }
+  const fees = Object.fromEntries(ALL_METHODS.map((m) => [m, processingFeeRate(m)]));
+  return res.json({
+    quote: publicView(quote),
+    mode: 'charge',
+    charge: { kind: charge.kind, description: charge.description, amount: charge.amount },
+    fees,
+  });
+}
+
+const CHARGE_KINDS = ['damage', 'cleaning', 'other'];
+const MAX_EXTRA_CHARGE = 10000;
+
+// damage or cleaning found after the trip: the admin sets the amount, the customer gets its own invoice
+const addCharge = async (req, res) => {
+  try {
+    const kind = v.oneOf(req.body?.kind, 'Charge type', CHARGE_KINDS);
+    const description = v.text(req.body?.description, 'Description', { max: v.LIMITS.reason });
+    const amount = round2(Number(req.body?.amount));
+    if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_EXTRA_CHARGE) {
+      return res.status(400).json({ error: `Enter an amount between $0.01 and $${MAX_EXTRA_CHARGE.toLocaleString('en-US')}.` });
+    }
+
+    const quote = await Quote.findById(req.params.id);
+    if (!quote) return res.status(404).json({ error: 'Request not found' });
+    if (quote.status !== 'paid') {
+      return res.status(409).json({ error: 'Charges can only be added to a paid booking.' });
+    }
+
+    const { addExtraCharge } = require('../services/extraCharges.js');
+    const result = await addExtraCharge(quote, { kind, description, amount, createdBy: req.user?.id });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return v.handle(res, err, 'Could not add this charge');
   }
 };
 
@@ -449,5 +513,5 @@ const suggestBaseFor = async (req, res) => {
 
 module.exports = {
   createQuote, createOpenQuote, matchQuote, listQuotes, getQuote, acceptQuote, declineQuote, getQuoteByToken,
-  chargeBalance, suggestQuote, suggestBaseFor,
+  chargeBalance, suggestQuote, suggestBaseFor, addCharge,
 };
