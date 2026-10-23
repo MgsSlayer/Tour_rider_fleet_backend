@@ -6,6 +6,7 @@ const v = require('../helpers/validate.js');
 const { hashToken, newToken, depositRate, quoteDepositRate } = require('../helpers/tokens.js');
 const { ALL_METHODS, processingFeeRate } = require('../helpers/paymentMethods.js');
 const { fetchFleet, matchFleet, VEHICLE_CATEGORIES, CITY_IDS } = require('../services/fleetService.js');
+const { MAX_STOPS, stopsOf } = require('../helpers/stops.js');
 
 // the fleet does not take bookings shorter than this
 const MIN_TRIP_HOURS = 3;
@@ -32,7 +33,7 @@ const publicView = (q) => ({
   pickupTime: q.pickupTime,
   finalDropoffTime: q.finalDropoffTime,
   pickupAddress: q.pickupAddress,
-  stopoverAddress: q.stopoverAddress,
+  stopovers: stopsOf(q),
   dropoffAddress: q.dropoffAddress,
   passengers: q.passengers,
   tripType: q.tripType,
@@ -44,6 +45,17 @@ const publicView = (q) => ({
   amountPaid: q.amountPaid,
   remainingBalance: q.remainingBalance,
 });
+
+// stop-overs in route order; a page cached from before sends the old single field
+function readStops(b) {
+  const raw = Array.isArray(b.stopovers) ? b.stopovers
+    : (b.stopoverAddress ? [{ address: b.stopoverAddress, coords: b.stopoverCoords }] : []);
+  if (raw.length > MAX_STOPS) throw new v.ValidationError(`No more than ${MAX_STOPS} stop-overs`);
+  return raw.map((s, i) => ({
+    address: v.text(s?.address, `Stop-over ${i + 1} address`, { max: v.LIMITS.address }),
+    coords: v.coords(s?.coords, `Stop-over ${i + 1}`),
+  }));
+}
 
 // the trip fields both quote pages send
 const readTrip = (b) => {
@@ -58,29 +70,29 @@ const readTrip = (b) => {
     pickupTime: v.clockTime(b.pickupTime, 'Pick-up time'),
     finalDropoffTime: v.clockTime(b.finalDropoffTime, 'Final drop-off time'),
     pickupAddress: v.text(b.pickupAddress, 'Pick-up address', { max: L.address }),
-    stopoverAddress: v.text(b.stopoverAddress, 'Stop-over address', { required: false, max: L.address }),
+    stopovers: readStops(b),
     dropoffAddress: v.text(b.dropoffAddress, 'Drop-off address', { max: L.address }),
     message: v.text(b.message, 'Message', { required: false, max: L.message }),
     coords: {
       pickup: v.coords(b.pickupCoords, 'Pick-up'),
-      stopover: v.coords(b.stopoverCoords, 'Stop-over'),
       dropoff: v.coords(b.dropoffCoords, 'Drop-off'),
     },
   };
 };
 
-// rejects a pickup in the past or a trip shorter than the fleet books
-function pickupInstant(data) {
+// rejects a pickup in the past, and a trip shorter than the fleet books unless the page takes any length
+function pickupInstant(data, { enforceMinimum = true } = {}) {
   const at = toDateTime(data.date, data.pickupTime);
   if (!at) throw new v.ValidationError('Invalid date or pick-up time');
   if (at.getTime() < Date.now()) throw new v.ValidationError('Pick-up date and time must be in the future');
 
   const booked = tripMinutes(data.date, data.pickupTime, data.finalDropoffTime);
-  if (booked === null || booked < MIN_TRIP_HOURS * 60) throw new v.ValidationError(MIN_TRIP_MESSAGE);
+  if (booked === null) throw new v.ValidationError('Invalid date or pick-up time');
+  if (enforceMinimum && booked < MIN_TRIP_HOURS * 60) throw new v.ValidationError(MIN_TRIP_MESSAGE);
   return at;
 }
 
-const tripRecord = (data) => ({
+const tripRecord = (data, opts) => ({
   customer: { name: data.name, email: data.email, phone: data.phone },
   tripType: data.tripType,
   passengers: data.passengers,
@@ -88,11 +100,11 @@ const tripRecord = (data) => ({
   pickupTime: data.pickupTime,
   finalDropoffTime: data.finalDropoffTime,
   pickupAddress: data.pickupAddress,
-  stopoverAddress: data.stopoverAddress,
+  stopovers: data.stopovers,
   dropoffAddress: data.dropoffAddress,
   message: data.message,
   coords: data.coords,
-  pickupDateTime: pickupInstant(data),
+  pickupDateTime: pickupInstant(data, opts),
 });
 
 const createQuote = async (req, res) => {
@@ -170,7 +182,8 @@ const createOpenQuote = async (req, res) => {
       city: v.oneOf(b.city, 'City', CITY_IDS),
     };
 
-    const quote = await Quote.create({ kind: 'open', wants, ...tripRecord(readTrip(b)) });
+    // any length is accepted here; the 3-hour minimum is applied to the suggested price instead
+    const quote = await Quote.create({ kind: 'open', wants, ...tripRecord(readTrip(b), { enforceMinimum: false }) });
 
     matchAndNotify(quote).catch((e) => console.error('admin notify failed:', e.message));
 

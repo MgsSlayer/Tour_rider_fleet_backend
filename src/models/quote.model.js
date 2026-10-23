@@ -20,6 +20,12 @@ const vehicleSchema = new mongoose.Schema({
   pic: { type: String },
 }, { _id: false });
 
+// one stop-over, in the order the customer listed it
+const stopSchema = new mongoose.Schema({
+  address: { type: String, required: true },
+  coords: { lat: Number, lng: Number },
+}, { _id: false });
+
 // one fleet vehicle that fits an open request, priced for that trip
 const matchSchema = new mongoose.Schema({
   sn: { type: String, required: true },
@@ -55,7 +61,9 @@ const quoteSchema = new mongoose.Schema({
   pickupTime: { type: String, required: true },
   finalDropoffTime: { type: String, required: true },
   pickupAddress: { type: String, required: true },
+  // kept for bookings made before multiple stop-overs; new ones use `stopovers`
   stopoverAddress: String,
+  stopovers: { type: [stopSchema], default: undefined },
   dropoffAddress: { type: String, required: true },
 
   // captured from the customer's autocomplete pick, so the admin map needs no geocoding

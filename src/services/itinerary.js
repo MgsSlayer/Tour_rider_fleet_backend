@@ -7,6 +7,7 @@ const PDFDocument = require('pdfkit');
 const { formatInZone, zonedToUtc } = require('../helpers/datetime.js');
 const { round2 } = require('../helpers/pricing.js');
 const { balancePlan } = require('../helpers/paymentMethods.js');
+const { stopRows } = require('../helpers/stops.js');
 
 const METHOD_LABELS = {
   card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App Pay',
@@ -49,7 +50,7 @@ function itineraryRows(quote) {
     ['Pick-up', formatInZone(new Date(quote.pickupDateTime))],
     ['Pick-up address', quote.pickupAddress],
   ];
-  if (quote.stopoverAddress) rows.push(['Stop over', quote.stopoverAddress]);
+  stopRows(quote).forEach((row) => rows.push(row));
   rows.push(['Drop-off address', quote.dropoffAddress]);
   rows.push(['Final drop-off', `${quote.finalDropoffTime} (${quote.date})`]);
   if (quote.message) rows.push(['Customer note', quote.message]);
@@ -265,7 +266,7 @@ function buildCalendarInvite(quote) {
     `Passengers: ${quote.passengers}`,
     `Trip type: ${quote.tripType}`,
     `Pick-up: ${quote.pickupAddress}`,
-    quote.stopoverAddress ? `Stop over: ${quote.stopoverAddress}` : null,
+    ...stopRows(quote).map(([label, address]) => `${label}: ${address}`),
     `Drop-off: ${quote.dropoffAddress}`,
     `Ref: ${quote.reservationNumber || quote._id}`,
   ].filter(Boolean).join('\n');

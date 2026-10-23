@@ -7,6 +7,7 @@ const { quoteDepositRate } = require('../helpers/tokens.js');
 const { round2 } = require('../helpers/pricing.js');
 const { isConfigured: paypalConfigured } = require('../config/paypal.js');
 const { wantsLabel } = require('./fleetService.js');
+const { stopRows } = require('../helpers/stops.js');
 
 // USE_RESEND=true sends everything through Resend and leaves SMTP idle; anything else keeps SMTP
 const useResend = () => String(process.env.USE_RESEND || '').trim().toLowerCase() === 'true';
@@ -257,7 +258,7 @@ const tripRows = (q) => [
   q.vehicle ? ['Vehicle', q.vehicle.name || q.vehicle.type || 'Selected vehicle'] : null,
   ['Date', `${q.date} at ${q.pickupTime}`],
   ['Pick-up', q.pickupAddress],
-  q.stopoverAddress ? ['Stop over', q.stopoverAddress] : null,
+  ...stopRows(q),
   ['Drop-off', q.dropoffAddress],
   ['Passengers', q.passengers],
 ];
@@ -355,7 +356,8 @@ async function sendAdminOpenRequest(quote) {
 
   const c = quote.customer;
   const wants = wantsLabel(quote.wants);
-  const { vehicles = [], error } = quote.matching || {};
+  const { vehicles = [], error, route } = quote.matching || {};
+  const minimumNote = route?.minimumNote || '';
   const summary = vehicles.length
     ? `${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} fit this trip, smallest first. Prices are full trip totals before any edits.`
     : error ? 'The fleet could not be checked automatically.' : 'No vehicles in the fleet fit this trip.';
@@ -369,6 +371,7 @@ async function sendAdminOpenRequest(quote) {
       + `${quote.pickupAddress} -> ${quote.dropoffAddress} · ${quote.passengers} passengers\n\n`
       + (error ? `${error}\n` : '')
       + `${summary}\n`
+      + (minimumNote ? `${minimumNote}\n` : '')
       + vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m) => {
         const p = matchPrices(m);
         return `- ${m.name} (${matchMeta(m)}): ${p.main}${p.sub ? `, ${p.sub}` : ''}`;
@@ -389,6 +392,7 @@ async function sendAdminOpenRequest(quote) {
         + messageBlock(quote.message)
         + (error ? para(`<span style="color:${BRAND.bad};">${esc(error)}</span>`) : '')
         + para(esc(summary))
+        + (minimumNote && vehicles.length ? para(`<span style="font-size:13px;color:${BRAND.muted};">${esc(minimumNote)}</span>`) : '')
         + (vehicles.length ? matchTable(vehicles) : '')
         + (site() ? button(`${site()}/admin.html`, 'Pick a vehicle') : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">Pick one, adjust the price if needed, and send it. The customer gets the vehicle, the price and a payment link.</span>`),

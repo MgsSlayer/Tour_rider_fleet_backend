@@ -4,6 +4,7 @@
 
 const { tripMinutes } = require('../helpers/datetime.js');
 const { computeQuote } = require('../helpers/pricing.js');
+const { stopsOf } = require('../helpers/stops.js');
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const round3 = (n) => Math.round((Number(n) + Number.EPSILON) * 1000) / 1000;
@@ -29,7 +30,8 @@ const FAR_MILES = 40;
 const key = () => process.env.GOOGLE_MAPS_API_KEY;
 
 /** Drive time, distance and tolls for the actual route. */
-async function routeFacts({ pickupAddress, stopoverAddress, dropoffAddress }) {
+async function routeFacts(quote) {
+  const { pickupAddress, dropoffAddress } = quote;
   const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
     method: 'POST',
     headers: {
@@ -42,7 +44,7 @@ async function routeFacts({ pickupAddress, stopoverAddress, dropoffAddress }) {
       destination: { address: dropoffAddress },
       // a Waypoint takes the address directly; wrapping it in `location` is
       // rejected outright, which silently broke every trip with a stop-over
-      intermediates: stopoverAddress ? [{ address: stopoverAddress }] : [],
+      intermediates: stopsOf(quote).map((address) => ({ address })),
       travelMode: 'DRIVE',
       extraComputations: ['TOLLS'],
     }),
@@ -106,7 +108,14 @@ async function nearestBase(pickupAddress, bases) {
   return { ...closest, units, fee: round2(LONG_HAUL_FEE * units) };
 }
 
-/** Hours the vehicle is actually booked for, never less than the drive time. */
+// the custom quote page takes bookings of any length, so the minimum is applied
+// here, to the suggested price, where the admin can still change it
+const MIN_BILLABLE_HOURS = 3;
+
+/**
+ * Hours the vehicle is billed for: the booking, or the drive time if longer,
+ * and never under the minimum. `minutes` is the trip length before rounding.
+ */
 function billableHours(quote, driveMinutes) {
   const booked = tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime);
   if (booked === null) throw new Error('This request has an unreadable date or time');
@@ -114,7 +123,8 @@ function billableHours(quote, driveMinutes) {
   // 36 minutes or more rounds up. Compared in whole minutes because the original
   // float test (raw % 1 >= 0.6) misses exact cases — 6.6 % 1 is 0.5999999999999996.
   const whole = Math.floor(minutes / 60);
-  return Math.max(1, minutes % 60 >= 36 ? whole + 1 : whole);
+  const rounded = Math.max(1, minutes % 60 >= 36 ? whole + 1 : whole);
+  return { hours: Math.max(MIN_BILLABLE_HOURS, rounded), minimumApplied: rounded < MIN_BILLABLE_HOURS, minutes };
 }
 
 /**
@@ -124,7 +134,7 @@ function billableHours(quote, driveMinutes) {
  * the customer never sees a separate surcharge — but it is still in the total,
  * and `baseFareParts` spells out what the number is made of for the admin.
  */
-function candidate(label, hourlyRate, { hours, tolls, repositioning }) {
+function candidate(label, hourlyRate, { hours, tolls, repositioning, minimumApplied = false }) {
   const rate = Number(hourlyRate);
   if (!Number.isFinite(rate) || rate <= 0) return null;
 
@@ -145,7 +155,7 @@ function candidate(label, hourlyRate, { hours, tolls, repositioning }) {
     hourlyRate: rate,
     baseFare,
     // what the admin is shown so the base fare is never a mystery number
-    baseFareParts: { hours, hourlyRate: rate, driveTime, repositioning },
+    baseFareParts: { hours, hourlyRate: rate, driveTime, repositioning, minimumApplied },
     lineItems,
   };
 }
@@ -166,11 +176,18 @@ async function tripContext(quote, bases = [], chosenBaseId = null) {
   // instead of one per base, and it respects the admin's judgement
   const chosen = chosenBaseId && bases.find((b) => String(b._id) === String(chosenBaseId));
   const near = await nearestBase(quote.pickupAddress, chosen ? [chosen] : bases);
-  const hours = billableHours(quote, facts.driveMinutes);
+  const { hours, minimumApplied, minutes } = billableHours(quote, facts.driveMinutes);
 
   return {
-    ctx: { hours, tolls: facts.tolls, repositioning: near.fee },
-    route: { ...facts, hours },
+    ctx: { hours, tolls: facts.tolls, repositioning: near.fee, minimumApplied },
+    route: {
+      ...facts,
+      hours,
+      // said plainly, because a short trip priced at 3 hours otherwise looks like a mistake
+      ...(minimumApplied
+        ? { minimumNote: `Trip is ${formatDuration(minutes)}, so it is priced at the ${MIN_BILLABLE_HOURS}-hour minimum.` }
+        : {}),
+    },
     repositioning: {
       fee: near.fee,
       units: near.units || 0,
