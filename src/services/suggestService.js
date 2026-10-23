@@ -111,6 +111,8 @@ async function nearestBase(pickupAddress, bases) {
 // the custom quote page takes bookings of any length, so the minimum is applied
 // here, to the suggested price, where the admin can still change it
 const MIN_BILLABLE_HOURS = 3;
+// a part hour longer than this is billed as a whole one
+const ROUND_UP_AFTER_MINUTES = 15;
 
 /**
  * Hours the vehicle is billed for: the booking, or the drive time if longer,
@@ -120,10 +122,10 @@ function billableHours(quote, driveMinutes) {
   const booked = tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime);
   if (booked === null) throw new Error('This request has an unreadable date or time');
   const minutes = Math.max(booked, driveMinutes);
-  // 36 minutes or more rounds up. Compared in whole minutes because the original
-  // float test (raw % 1 >= 0.6) misses exact cases — 6.6 % 1 is 0.5999999999999996.
+  // more than 15 minutes past the hour counts as a full hour; exactly 15 does not.
+  // Compared in whole minutes, since tests on fractional hours miss exact cases.
   const whole = Math.floor(minutes / 60);
-  const rounded = Math.max(1, minutes % 60 >= 36 ? whole + 1 : whole);
+  const rounded = Math.max(1, minutes % 60 > ROUND_UP_AFTER_MINUTES ? whole + 1 : whole);
   return { hours: Math.max(MIN_BILLABLE_HOURS, rounded), minimumApplied: rounded < MIN_BILLABLE_HOURS, minutes };
 }
 
