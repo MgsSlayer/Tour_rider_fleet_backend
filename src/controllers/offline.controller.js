@@ -32,13 +32,12 @@ const chooseOffline = async (req, res) => {
     if (payable.error) {
       return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    const { quote, mode, amount, remaining, isDeposit, gratuity } = payable;
+    const {
+      quote, mode, amount, remaining, isDeposit, grandTotal, gratuity,
+    } = payable;
 
     // an extra charge settled by Zelle is recorded on the charge; the admin confirms it arrived
     if (mode === 'charge') {
-      if (method === 'cash') {
-        return res.status(400).json({ success: false, error: 'Please pay this charge by Zelle or card.' });
-      }
       const charge = quote.extraCharges.id(payable.chargeId);
       charge.method = method;
       charge.offlineChosenAt = new Date();
@@ -56,14 +55,6 @@ const chooseOffline = async (req, res) => {
       });
     }
 
-    // cash cannot hold a date, so it only settles a booking outright
-    if (method === 'cash' && mode === 'initial' && isDeposit) {
-      return res.status(400).json({
-        success: false,
-        error: 'Cash is only available when paying in full. Choose another method for a deposit.',
-      });
-    }
-
     if (mode === 'balance') {
       quote.balanceMethod = method;
     } else {
@@ -74,6 +65,7 @@ const chooseOffline = async (req, res) => {
       quote.remainingBalance = remaining;
       quote.processingFee = 0;
       quote.processingFeeRate = 0;
+      quote.grandTotal = grandTotal;
       if (gratuity) Object.assign(quote.gratuity, gratuity);
     }
     quote.offlineChosenAt = new Date();

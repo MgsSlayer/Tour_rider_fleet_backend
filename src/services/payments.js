@@ -4,9 +4,11 @@
 
 const Quote = require('../models/quote.model.js');
 const email = require('./emailService.js');
-const { round2 } = require('../helpers/pricing.js');
+const { round2, priceBooking, addFee } = require('../helpers/pricing.js');
 const { hashToken, quoteDepositRate } = require('../helpers/tokens.js');
-const { methodLabel, processingFeeRate, isOffline } = require('../helpers/paymentMethods.js');
+const {
+  methodLabel, processingFeeRate, isOffline, balanceDue, balancePlan,
+} = require('../helpers/paymentMethods.js');
 const { GRATUITY_PERCENTS, gratuityAmount } = require('../helpers/gratuity.js');
 const { tripMinutes } = require('../helpers/datetime.js');
 
@@ -55,8 +57,8 @@ function readGratuity(quote, input = {}) {
  * Resolves a raw payment token to the quote and the exact sum due.
  *
  * `subtotal` is what the booking is worth; `fee` is the surcharge for the chosen
- * method, and `amount` is what actually gets charged. The processor takes its cut
- * of everything that moves, so the fee is on the whole sum being settled.
+ * method, and `amount` is what actually gets charged. The fee is on the booking
+ * only; gratuity added online is passed on to the driver without one.
  *
  * Returns { error } instead of throwing so callers can map it to a status code.
  */
@@ -74,10 +76,15 @@ async function resolvePayable(rawToken, paymentOption, method = 'card', gratuity
     if (!owesBalance) {
       return { error: { status: 409, message: 'This booking has already been paid' } };
     }
+    const feeRate = processingFeeRate(method);
+    const due = balanceDue(quote, feeRate);
     return {
       quote,
       mode: 'balance',
-      ...priced(round2(quote.remainingBalance), method),
+      subtotal: due.base,
+      feeRate,
+      fee: due.fee,
+      amount: due.amount,
       remaining: 0,
       isDeposit: false,
     };
@@ -101,13 +108,21 @@ async function resolvePayable(rawToken, paymentOption, method = 'card', gratuity
   const tip = picked.gratuity?.method === 'online' ? picked.gratuity.amount : 0;
 
   const isDeposit = paymentOption === 'deposit';
+  const feeRate = processingFeeRate(method);
   // the deposit never carries gratuity; added online, the whole of it goes with the balance
-  const subtotal = isDeposit ? round2(total * rate) : round2(total + tip);
+  const figures = priceBooking({
+    quotedAmount: total, gratuity: tip, depositRate: isDeposit ? rate : 1, feeRate,
+  });
+  const part = isDeposit ? figures.deposit : figures.full;
   return {
     quote,
     mode: 'initial',
-    ...priced(subtotal, method),
-    remaining: isDeposit ? round2(total - subtotal + tip) : 0,
+    subtotal: part.subtotal,
+    feeRate,
+    fee: part.fee,
+    amount: part.amount,
+    remaining: isDeposit ? figures.balance.subtotal : 0,
+    grandTotal: figures.total,
     isDeposit,
     gratuity: picked.gratuity,
   };
@@ -116,8 +131,7 @@ async function resolvePayable(rawToken, paymentOption, method = 'card', gratuity
 // the surcharge for one method on one sum
 function priced(subtotal, method) {
   const feeRate = processingFeeRate(method);
-  const fee = round2(subtotal * feeRate);
-  return { subtotal, feeRate, fee, amount: round2(subtotal + fee) };
+  return { feeRate, ...addFee(subtotal, feeRate) };
 }
 
 /**
@@ -126,7 +140,7 @@ function priced(subtotal, method) {
  */
 async function applyPayment(quote, ctx) {
   const {
-    mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit,
+    mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit, grandTotal,
     paymentId, customerId = null, cardId = null, paypal = null, gratuity = null,
   } = ctx;
 
@@ -148,6 +162,7 @@ async function applyPayment(quote, ctx) {
     quote.amountPaid = amount;
     quote.processingFeeRate = feeRate;
     quote.processingFee = fee;
+    quote.grandTotal = grandTotal;
     quote.paymentId = paymentId || null;
     // what is still owed on the booking itself; its own surcharge is added when it is settled
     quote.remainingBalance = remaining;
@@ -181,6 +196,8 @@ async function applyPayment(quote, ctx) {
     processingFee: fee,
     processingFeeRate: feeRate,
     remainingBalance: mode === 'balance' ? 0 : remaining,
+    // what the balance will actually cost, processing fee included
+    balanceAmount: mode === 'initial' && isDeposit ? balancePlan(quote).amount : 0,
     method: methodLabel(method),
     // a wallet or PayPal deposit cannot be auto-charged later, so say so plainly
     balanceByLink: mode === 'initial' && isDeposit && !cardId,

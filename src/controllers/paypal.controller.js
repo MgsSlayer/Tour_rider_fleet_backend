@@ -99,7 +99,9 @@ const captureOrder = async (req, res) => {
     if (payable.error) {
       return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    const { quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId } = payable;
+    const {
+      quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit, grandTotal, gratuity, chargeId,
+    } = payable;
 
     // the order must be the one this link opened, or it is someone else's money
     if (!quote.paypalOrderId || quote.paypalOrderId !== orderId) {
@@ -143,7 +145,7 @@ const captureOrder = async (req, res) => {
     }
 
     const result = await applyPayment(quote, {
-      mode, method: fields.method, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId,
+      mode, method: fields.method, amount, subtotal, fee, feeRate, remaining, isDeposit, grandTotal, gratuity, chargeId,
       paymentId: settled.id,
       paypal: { orderId, captureId: settled.id },
     });

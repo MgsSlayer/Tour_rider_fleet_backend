@@ -54,6 +54,15 @@ function vehicleCategory(v) {
 const rate = (s) => parseFloat(String(s || '').replace(/[^0-9.]/g, '')) || null;
 const seats = (v) => parseInt(v.capacity, 10);
 
+// the shortest booking a vehicle takes; party buses seating 25 or more go out for longer
+const MIN_TRIP_HOURS = 3;
+const PARTY_BUS_MIN_HOURS = 5;
+const LARGE_PARTY_BUS_SEATS = 25;
+function minTripHours(v) {
+  const large = vehicleCategory(v || {}) === 'party-bus' && seats(v || {}) >= LARGE_PARTY_BUS_SEATS;
+  return large ? PARTY_BUS_MIN_HOURS : MIN_TRIP_HOURS;
+}
+
 /**
  * Vehicles that fit the request, smallest that seats everyone first. Vehicles
  * without a photo are left out because the fleet page hides them too.
@@ -80,4 +89,6 @@ const wantsLabel = (wants = {}) => [
   CITIES.find((c) => c.id === wants.city)?.label,
 ].filter(Boolean).join(' · ');
 
-module.exports = { fetchFleet, matchFleet, wantsLabel, VEHICLE_CATEGORIES, CITY_IDS };
+module.exports = {
+  fetchFleet, matchFleet, wantsLabel, minTripHours, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
+};

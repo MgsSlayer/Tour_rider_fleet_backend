@@ -1,17 +1,23 @@
 const Quote = require('../models/quote.model.js');
 const email = require('../services/emailService.js');
-const { computeQuote, round2 } = require('../helpers/pricing.js');
+const {
+  computeQuote, priceBooking, addFee, round2,
+} = require('../helpers/pricing.js');
 const { zonedToUtc, tripMinutes } = require('../helpers/datetime.js');
 const v = require('../helpers/validate.js');
 const { hashToken, newToken, depositRate, quoteDepositRate } = require('../helpers/tokens.js');
-const { ALL_METHODS, processingFeeRate } = require('../helpers/paymentMethods.js');
-const { fetchFleet, matchFleet, VEHICLE_CATEGORIES, CITY_IDS } = require('../services/fleetService.js');
+const {
+  ALL_METHODS, processingFeeRate, balanceDue, bookingTotals,
+} = require('../helpers/paymentMethods.js');
+const {
+  fetchFleet, matchFleet, minTripHours, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
+} = require('../services/fleetService.js');
 const { MAX_STOPS, stopsOf } = require('../helpers/stops.js');
 const { DEFAULT_GRATUITY_PERCENT, gratuityOptions } = require('../helpers/gratuity.js');
 
-// the fleet does not take bookings shorter than this
-const MIN_TRIP_HOURS = 3;
-const MIN_TRIP_MESSAGE = `Trips run for a minimum of ${MIN_TRIP_HOURS} hours. Please adjust your pick-up or drop-off time.`;
+// the fleet does not take bookings shorter than the vehicle's minimum; only large party buses go above the standard one
+const minTripMessage = (hours) => `${hours > MIN_TRIP_HOURS ? 'This party bus runs' : 'Trips run'} for a minimum of ${hours} hours. `
+  + 'Please adjust your pick-up or drop-off time.';
 
 
 // the form posts wall-clock times in the fleet's timezone, not the server's
@@ -23,6 +29,39 @@ const depositFor = (q) => {
   const rate = quoteDepositRate(q);
   return q.quotedAmount && rate < 1 ? round2(round2(q.quotedAmount) * rate) : null;
 };
+
+// every figure the payment page can show, per fee rate and gratuity pick, so it never prices anything itself
+function priceTable(q, mode, charge = null) {
+  const rates = [...new Set(ALL_METHODS.map(processingFeeRate))];
+  if (mode === 'charge') return rates.map((rate) => ({ rate, now: addFee(round2(charge.amount), rate) }));
+  if (mode === 'balance') {
+    return rates.map((rate) => {
+      const due = balanceDue(q, rate);
+      return { rate, now: { subtotal: due.base, fee: due.fee, amount: due.amount } };
+    });
+  }
+  const tips = [0, ...(q.gratuity?.customerChooses ? gratuityOptions(q).map((o) => o.amount) : [])];
+  return rates.flatMap((rate) => tips.map((tip) => ({
+    rate,
+    tip,
+    ...priceBooking({
+      quotedAmount: q.quotedAmount, gratuity: tip, depositRate: quoteDepositRate(q), feeRate: rate,
+    }),
+  })));
+}
+
+// the dashboard's money figures, worked out here so they match the emails to the cent
+function dashboardFigures(q) {
+  if (!q.quotedAmount) return null;
+  if (['paid', 'awaiting_payment'].includes(q.status) && q.paymentOption) return bookingTotals(q);
+  // not paid yet: priced by card, as the quote email shows it
+  const card = priceBooking({
+    quotedAmount: q.quotedAmount, depositRate: quoteDepositRate(q), feeRate: processingFeeRate('card'),
+  });
+  return {
+    subtotal: card.subtotal, fee: card.fee, total: card.total, deposit: card.deposit?.amount ?? null, byCard: true,
+  };
+}
 
 const publicView = (q) => ({
   id: q._id,
@@ -96,16 +135,16 @@ const readTrip = (b) => {
 };
 
 // rejects a pickup in the past, and a trip shorter than the fleet books unless the page takes any length
-function pickupInstant(data, { enforceMinimum = true } = {}) {
+function pickupInstant(data, { enforceMinimum = true, minHours = MIN_TRIP_HOURS } = {}) {
   const at = toDateTime(data.date, data.pickupTime);
   if (!at) throw new v.ValidationError('Invalid date or pick-up time');
   if (at.getTime() < Date.now()) throw new v.ValidationError('Pick-up date and time must be in the future');
 
-  // without a drop-off time there is no length to check; the suggested price carries the 3-hour minimum
+  // without a drop-off time there is no length to check; the suggested price carries the vehicle's minimum
   if (!data.finalDropoffTime) return at;
   const booked = tripMinutes(data.date, data.pickupTime, data.finalDropoffTime);
   if (booked === null) throw new v.ValidationError('Invalid date or pick-up time');
-  if (enforceMinimum && booked < MIN_TRIP_HOURS * 60) throw new v.ValidationError(MIN_TRIP_MESSAGE);
+  if (enforceMinimum && booked < minHours * 60) throw new v.ValidationError(minTripMessage(minHours));
   return at;
 }
 
@@ -134,7 +173,7 @@ const createQuote = async (req, res) => {
       capacity: v.text(b.vehicleCapacity, 'Capacity', { required: false, max: 10 }),
     };
 
-    const quote = await Quote.create({ vehicle, ...tripRecord(readTrip(b)) });
+    const quote = await Quote.create({ vehicle, ...tripRecord(readTrip(b), { minHours: minTripHours(vehicle) }) });
 
     // a failed notification must not lose the customer's request
     email.sendAdminNewRequest(quote).catch((e) => console.error('admin notify failed:', e.message));
@@ -199,7 +238,7 @@ const createOpenQuote = async (req, res) => {
       city: v.oneOf(b.city, 'City', CITY_IDS),
     };
 
-    // any length is accepted here; the 3-hour minimum is applied to the suggested price instead
+    // any length is accepted here; each vehicle's minimum is applied to its suggested price instead
     const quote = await Quote.create({ kind: 'open', wants, ...tripRecord(readTrip(b), { enforceMinimum: false }) });
 
     matchAndNotify(quote).catch((e) => console.error('admin notify failed:', e.message));
@@ -228,13 +267,29 @@ const matchQuote = async (req, res) => {
   }
 };
 
+// "paid" splits by whether a balance is still owed; both stay status 'paid' in the database
+const STATUS_VIEWS = {
+  deposit_paid: {
+    status: 'paid', paymentOption: 'deposit', remainingBalance: { $gt: 0 }, remainingBalancePaid: { $ne: true },
+  },
+  paid_in_full: {
+    status: 'paid',
+    $or: [{ paymentOption: { $ne: 'deposit' } }, { remainingBalancePaid: true }, { remainingBalance: { $lte: 0 } }],
+  },
+};
+
 const listQuotes = async (req, res) => {
   try {
-    const filter = {};
-    if (req.query.status) filter.status = req.query.status;
+    const status = req.query.status ? String(req.query.status) : '';
+    const filter = STATUS_VIEWS[status] || (status ? { status } : {});
     const quotes = await Quote.find(filter).sort({ createdAt: -1 }).limit(200).lean();
     // the dashboard pre-fills each new quote's deposit with this
-    return res.json({ quotes, depositPercent: Math.round(depositRate() * 100) });
+    return res.json({
+      quotes: quotes.map((q) => ({ ...q, figures: dashboardFigures(q) })),
+      depositPercent: Math.round(depositRate() * 100),
+      // lets the quote editor preview the card price the email will quote
+      cardFeeRate: processingFeeRate('card'),
+    });
   } catch (err) {
     console.error('listQuotes error:', err);
     return res.status(500).json({ error: 'Could not load requests' });
@@ -244,7 +299,7 @@ const listQuotes = async (req, res) => {
 const getQuote = async (req, res) => {
   const quote = await Quote.findById(req.params.id).lean();
   if (!quote) return res.status(404).json({ error: 'Request not found' });
-  return res.json({ quote });
+  return res.json({ quote: { ...quote, figures: dashboardFigures(quote) } });
 };
 
 const acceptQuote = async (req, res) => {
@@ -387,7 +442,9 @@ const getQuoteByToken = async (req, res) => {
     const mode = quote.status === 'paid' ? 'balance' : 'initial';
     // the page shows a total per method; the server still prices what it charges
     const fees = Object.fromEntries(ALL_METHODS.map((m) => [m, processingFeeRate(m)]));
-    return res.json({ quote: publicView(quote), mode, fees });
+    return res.json({
+      quote: publicView(quote), mode, fees, prices: priceTable(quote, mode),
+    });
   } catch (err) {
     console.error('getQuoteByToken error:', err);
     return res.status(500).json({ error: 'Could not load this quote' });
@@ -412,6 +469,7 @@ async function chargeByToken(raw, res) {
     mode: 'charge',
     charge: { kind: charge.kind, description: charge.description, amount: charge.amount },
     fees,
+    prices: priceTable(quote, 'charge', charge),
   });
 }
 

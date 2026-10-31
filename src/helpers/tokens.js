@@ -10,7 +10,7 @@ const newIdempotencyKey = () =>
 
 const depositRate = () => {
   const r = Number(process.env.DEPOSIT_RATE);
-  return Number.isFinite(r) && r > 0 && r < 1 ? r : 0.5;
+  return Number.isFinite(r) && r > 0 && r < 1 ? r : 0.2;
 };
 
 // the rate the admin set on this booking; bookings sent before that fall back to the default

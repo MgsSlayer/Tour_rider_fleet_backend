@@ -94,7 +94,9 @@ const payQuote = async (req, res) => {
     if (payable.error) {
       return res.status(payable.error.status).json({ success: false, error: payable.error.message });
     }
-    const { quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId } = payable;
+    const {
+      quote, mode, amount, subtotal, fee, feeRate, remaining, isDeposit, grandTotal, gratuity, chargeId,
+    } = payable;
 
     const idempotencyKey = newIdempotencyKey();
     let customerId = null;
@@ -149,7 +151,7 @@ const payQuote = async (req, res) => {
     }
 
     const result = await applyPayment(quote, {
-      mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit, gratuity, chargeId,
+      mode, method, amount, subtotal, fee, feeRate, remaining, isDeposit, grandTotal, gratuity, chargeId,
       paymentId: payment?.id || null, customerId, cardId,
     });
     return res.json(result);

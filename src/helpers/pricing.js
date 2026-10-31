@@ -6,6 +6,8 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const round3 = (n) => Math.round((Number(n) + Number.EPSILON) * 1000) / 1000;
 
 const MAX_LINES = 12;
+const TAX_LABEL = /\btax\b/i;
+const GRATUITY_LABEL = /\b(gratuity|tips?)\b/i;
 
 /**
  * Builds a priced breakdown from a base fare plus optional line items.
@@ -26,6 +28,7 @@ function computeQuote({ baseFare, lineItems = [] }) {
 
   const computed = [];
   const priorAmounts = new Map();
+  const labels = new Map();
 
   lineItems.forEach((raw, i) => {
     const label = String(raw?.label || '').trim();
@@ -50,6 +53,11 @@ function computeQuote({ baseFare, lineItems = [] }) {
       if (value > 100) throw new Error(`"${label}" cannot be more than 100%`);
       basis = Array.isArray(raw.basis) && raw.basis.length ? raw.basis.map(String) : ['base'];
 
+      // sales tax is charged on the fare, never on gratuity
+      if (TAX_LABEL.test(label) && basis.some((ref) => GRATUITY_LABEL.test(labels.get(ref) || ''))) {
+        throw new Error(`"${label}" cannot be charged on gratuity`);
+      }
+
       let basisTotal = 0;
       for (const ref of basis) {
         if (ref === 'base') { basisTotal += base; continue; }
@@ -62,6 +70,7 @@ function computeQuote({ baseFare, lineItems = [] }) {
     }
 
     priorAmounts.set(id, amount);
+    labels.set(id, label);
     computed.push({ id, label, mode, value: mode === 'percent' ? round3(value) : round2(value), basis, amount });
   });
 
@@ -71,4 +80,41 @@ function computeQuote({ baseFare, lineItems = [] }) {
   return { baseFare: base, lineItems: computed, total };
 }
 
-module.exports = { computeQuote, round2, MAX_LINES };
+// one sum with one method's processing fee on top
+const addFee = (subtotal, rate) => {
+  const fee = round2(subtotal * rate);
+  return { subtotal, fee, amount: round2(subtotal + fee) };
+};
+
+/**
+ * What a booking costs paid at one processing-fee rate. Every figure the customer
+ * or admin sees comes from here, so no two screens can disagree.
+ *
+ * The fee is set once on the quote; gratuity added online is passed on at face
+ * value, with no fee on it. The deposit is a share of the quote's grand total, and
+ * the balance is whatever is left of the grand total, so the two always add up to
+ * it to the cent. Gratuity added online goes wholly on the balance.
+ *
+ * @returns {{ subtotal, fee, total, full, deposit, balance }} deposit and balance are
+ *   null when the booking is full payment only; each part is { subtotal, fee, amount }.
+ */
+function priceBooking({ quotedAmount, gratuity = 0, depositRate = 1, feeRate = 0 }) {
+  const quoted = round2(quotedAmount);
+  const tip = round2(gratuity);
+  const charged = addFee(quoted, feeRate);
+  const full = { subtotal: round2(quoted + tip), fee: charged.fee, amount: round2(charged.amount + tip) };
+  const result = { subtotal: full.subtotal, fee: full.fee, total: full.amount, full, deposit: null, balance: null };
+  if (!(depositRate < 1)) return result;
+
+  const depositSubtotal = round2(quoted * depositRate);
+  const deposit = round2(charged.amount * depositRate);
+  const balanceSubtotal = round2(full.subtotal - depositSubtotal);
+  const balance = round2(full.amount - deposit);
+  result.deposit = { subtotal: depositSubtotal, fee: round2(deposit - depositSubtotal), amount: deposit };
+  result.balance = { subtotal: balanceSubtotal, fee: round2(balance - balanceSubtotal), amount: balance };
+  return result;
+}
+
+module.exports = {
+  computeQuote, priceBooking, addFee, round2, MAX_LINES,
+};

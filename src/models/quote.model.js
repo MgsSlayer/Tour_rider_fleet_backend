@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 
-// one priced row of the quote breakdown — tolls, gratuity, VAT, or anything custom
+// one priced row of the quote breakdown — tolls, gratuity, sales tax, or anything custom
 const lineItemSchema = new mongoose.Schema({
   id: { type: String, required: true },
   label: { type: String, required: true },
@@ -34,6 +34,8 @@ const matchSchema = new mongoose.Schema({
   capacity: String,
   pic: String,
   rates: { retail: Number, affiliate: Number },
+  // set when this vehicle's own minimum hours set its price, which a large party bus's can
+  minimumNote: String,
   // same shape as a dashboard suggestion: retail first, then affiliate
   candidates: mongoose.Schema.Types.Mixed,
 }, { _id: false });
@@ -154,6 +156,8 @@ const quoteSchema = new mongoose.Schema({
   // surcharge for the method the customer picked, charged on top of the quote
   processingFeeRate: Number,
   processingFee: { type: Number, default: 0 },
+  // quote + online gratuity + one processing fee at the first payment's rate; the balance is what is left of it
+  grandTotal: Number,
   // proof of acceptance at the moment of payment, not merely a ticked box
   termsAcceptedAt: Date,
   amountPaid: { type: Number, default: 0 },

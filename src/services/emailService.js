@@ -4,14 +4,14 @@ const {
 } = require('./itinerary.js');
 const { formatInZone } = require('../helpers/datetime.js');
 const {
-  methodLabel, processingFeeRate, balancePlan, ALL_METHODS, PAYPAL_METHODS,
+  methodLabel, processingFeeRate, balanceDue, balancePlan, bookingTotals, ALL_METHODS, PAYPAL_METHODS,
 } = require('../helpers/paymentMethods.js');
 const { quoteDepositRate } = require('../helpers/tokens.js');
-const { round2 } = require('../helpers/pricing.js');
+const { round2, priceBooking } = require('../helpers/pricing.js');
 const { isConfigured: paypalConfigured } = require('../config/paypal.js');
 const { wantsLabel } = require('./fleetService.js');
 const { stopRows } = require('../helpers/stops.js');
-const { gratuityOptions, bookingTotal, gratuityLabel } = require('../helpers/gratuity.js');
+const { gratuityOptions, gratuityLabel } = require('../helpers/gratuity.js');
 
 // USE_RESEND=true sends everything through Resend and leaves SMTP idle; anything else keeps SMTP
 const useResend = () => String(process.env.USE_RESEND || '').trim().toLowerCase() === 'true';
@@ -228,12 +228,12 @@ const button = (url, label) => `
   </td></tr>
 </table>`;
 
-// itemised charges — only rendered when the quote actually has extras
-const invoiceTable = (q) => {
+// itemised charges, ending in the grand total `totals` describes ({ fee, feeLabel, total, totalLabel })
+const invoiceTable = (q, totals) => {
   const lines = q.lineItems || [];
   // once chosen: added online it is part of the total, in cash it is listed after it
   const tip = q.gratuity?.method ? q.gratuity : null;
-  if (!lines.length && !tip) return '';
+  if (!lines.length && !tip && !totals.fee) return '';
 
   const row = (label, value, opts = {}) => `
   <tr>
@@ -250,28 +250,61 @@ const invoiceTable = (q) => {
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${row('Base fare', money(q.baseFare))}
   ${lines.map((l) => row(l.label, money(l.amount), { top: true })).join('')}
+  ${totals.fee ? row(totals.feeLabel, money(totals.fee), { top: true }) : ''}
   ${tip?.method === 'online' ? row(`Gratuity (${tip.percent}%)`, money(tip.amount), { top: true }) : ''}
-  ${row('Total', money(bookingTotal(q)), { top: true, strong: true })}
+  ${row(totals.totalLabel || 'Total', money(totals.total), { top: true, strong: true })}
   ${tip?.method === 'cash' ? row(`Gratuity (${tip.percent}%), cash to driver`, money(tip.amount), { top: true }) : ''}
 </table>`;
 };
 
-// the customer's gratuity choices, shown before they reach the payment page
-const gratuityChoices = (q) => gratuityOptions(q).map((o) => `${o.percent}% ${money(o.amount)}`).join(' · ');
 const CARD_HOLD_NOTE = 'Paying by card? Your card is kept on file until 48 hours after your trip, '
   + 'for any damage or cleaning charges, then removed.';
 
 const GRATUITY_HOW = 'Choose your gratuity option at checkout. You can add it to your online payment or pay your driver in cash. '
   + 'If you pay a deposit, any gratuity added online will be charged with the remaining balance.';
 
-const gratuityChoice = (q) => `
+// header and row rules shared by the price tables, so gratuity reads like the ways to pay
+const TABLE_HEAD = `padding:12px 16px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:${BRAND.muted};font-family:${FONT};`;
+const ROW_RULE = `border-top:1px solid ${BRAND.line};`;
+
+// what each gratuity choice brings the booking to by card; the deposit is the same whichever is picked
+function gratuityPrices(q) {
+  const rate = processingFeeRate('card');
+  const rows = gratuityOptions(q).map((o) => ({ ...o, price: quotePrice(q, rate, o.amount) }));
+  return { rows, deposit: quotePrice(q, rate).deposit?.amount ?? null };
+}
+
+const gratuityNote = (deposit) => `by card${deposit === null ? '' : ` · deposit ${money(deposit)}`}`;
+
+// the customer's gratuity choices, shown before they reach the payment page
+const gratuityChoiceText = (q) => {
+  const { rows, deposit } = gratuityPrices(q);
+  return `Gratuity (your choice at checkout, ${gratuityNote(deposit)}):\n`
+    + rows.map((r) => `- ${r.percent}% (${money(r.amount)}): ${money(r.price.total)} in full`
+      + (deposit === null ? '' : `, ${money(r.price.balance.amount)} balance`)).join('\n');
+};
+
+// laid out like the ways to pay: what paying in full, or the balance after a deposit, comes to with each choice
+const gratuityChoice = (q) => {
+  const { rows, deposit } = gratuityPrices(q);
+  const cell = `padding:10px 16px;font-size:14px;font-weight:700;color:${BRAND.text};font-family:${FONT};white-space:nowrap;${ROW_RULE}`;
+  return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
-  <tr><td class="tr-cell" style="padding:12px 16px 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-                                 color:${BRAND.muted};font-family:${FONT};">Gratuity, your choice</td></tr>
-  <tr><td class="tr-cell" style="padding:4px 16px;font-size:15px;font-weight:700;color:${BRAND.text};font-family:${FONT};">${esc(gratuityChoices(q))}</td></tr>
-  <tr><td class="tr-cell" style="padding:4px 16px 14px;font-size:13px;line-height:1.55;color:${BRAND.muted};font-family:${FONT};">${esc(GRATUITY_HOW)}</td></tr>
-</table>`;
+       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
+  <tr>
+    <td class="tr-cell" style="${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">${esc(gratuityNote(deposit))}</span></td>
+    <td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">In full</td>
+    ${deposit === null ? '' : `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">Balance</td>`}
+  </tr>
+  ${rows.map((r) => `
+  <tr>
+    <td class="tr-cell" style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};${ROW_RULE}">${r.percent}% · ${money(r.amount)}</td>
+    <td align="right" class="tr-cell" style="${cell}">${money(r.price.total)}</td>
+    ${deposit === null ? '' : `<td align="right" class="tr-cell" style="${cell}">${money(r.price.balance.amount)}</td>`}
+  </tr>`).join('')}
+</table>`
+    + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(GRATUITY_HOW)}</span>`);
+};
 
 // what the customer quotes back to us; older bookings may only have the database id
 const refOf = (q) => q.reservationNumber || String(q._id);
@@ -352,17 +385,22 @@ function matchPrices(m) {
 // many vehicles share a make and model, so the S/N is what tells them apart
 const matchMeta = (m) => [m.type, m.capacity ? `${m.capacity} passengers` : '', `S/N ${m.sn}`].filter(Boolean).join(' · ');
 
-const matchTable = (vehicles) => `
+// a vehicle priced at a longer minimum than the trip's note above the list says, as a large party bus can be
+const ownMinimum = (m, tripNote) => (m.minimumNote && m.minimumNote !== tripNote ? m.minimumNote : '');
+
+const matchTable = (vehicles, tripNote) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m, i) => {
     const p = matchPrices(m);
     const top = i ? `border-top:1px solid ${BRAND.line};` : '';
+    const own = ownMinimum(m, tripNote);
     return `
   <tr>
     <td class="tr-cell" style="padding:11px 16px;font-family:${FONT};${top}">
       <div style="font-size:14px;font-weight:600;color:${BRAND.text};">${esc(m.name)}</div>
       <div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(matchMeta(m))}</div>
+      ${own ? `<div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(own)}</div>` : ''}
     </td>
     <td align="right" class="tr-cell" style="padding:11px 16px;font-family:${FONT};white-space:nowrap;${top}">
       <div style="font-size:14px;font-weight:700;color:${BRAND.text};">${esc(p.main)}</div>
@@ -399,7 +437,8 @@ async function sendAdminOpenRequest(quote) {
       + (minimumNote ? `${minimumNote}\n` : '')
       + vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m) => {
         const p = matchPrices(m);
-        return `- ${m.name} (${matchMeta(m)}): ${p.main}${p.sub ? `, ${p.sub}` : ''}`;
+        const own = ownMinimum(m, minimumNote);
+        return `- ${m.name} (${matchMeta(m)}): ${p.main}${p.sub ? `, ${p.sub}` : ''}${own ? `. ${own}` : ''}`;
       }).join('\n')
       + `\n\nPick a vehicle on the admin dashboard to send it to the customer, or decline.`,
     html: shell({
@@ -418,7 +457,7 @@ async function sendAdminOpenRequest(quote) {
         + (error ? para(`<span style="color:${BRAND.bad};">${esc(error)}</span>`) : '')
         + para(esc(summary))
         + (minimumNote && vehicles.length ? para(`<span style="font-size:13px;color:${BRAND.muted};">${esc(minimumNote)}</span>`) : '')
-        + (vehicles.length ? matchTable(vehicles) : '')
+        + (vehicles.length ? matchTable(vehicles, minimumNote) : '')
         + (site() ? button(`${site()}/admin.html`, 'Pick a vehicle') : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">Pick one, adjust the price if needed, and send it. The customer gets the vehicle, the price and a payment link.</span>`),
     }),
@@ -447,11 +486,10 @@ const pct = (rate) => `${(rate * 100).toFixed(rate * 100 % 1 ? 2 : 0)}%`;
 
 // Methods grouped by the fee they attract, highest first. Read from the same
 // settings the payment page charges by, so the email never disagrees with it.
-function feeTiers({ noCash = false } = {}) {
+function feeTiers() {
   const tiers = new Map();
   ALL_METHODS
     .filter((m) => paypalConfigured() || !PAYPAL_METHODS.includes(m))
-    .filter((m) => !(noCash && m === 'cash'))
     .forEach((m) => {
       const rate = processingFeeRate(m);
       tiers.set(rate, [...(tiers.get(rate) || []), methodName(m)]);
@@ -460,30 +498,52 @@ function feeTiers({ noCash = false } = {}) {
     .sort(([a], [b]) => b - a)
     .map(([rate, names]) => ({
       names: names.join(', '),
+      rate,
       fee: rate ? `+${pct(rate)} fee` : 'No fee',
     }));
 }
 
-const paymentMethodsText = () => 'Ways to pay (any fee is added at checkout):\n'
-  + feeTiers().map((t) => `- ${t.names}: ${t.fee}`).join('\n');
+// a sum with one method's processing fee, rounded exactly as checkout rounds it
+const withFee = (amount, rate) => round2(Number(amount) + round2(Number(amount) * rate));
 
-// what each method adds, so the surcharge is no surprise at checkout
-const paymentMethods = ({ cashFullOnly = false, noCash = false } = {}) => `
+// the booking's figures at one fee rate, before any gratuity the customer has still to choose unless one is given
+const quotePrice = (quote, rate, gratuity = 0) => priceBooking({
+  quotedAmount: quote.quotedAmount, gratuity, depositRate: quoteDepositRate(quote), feeRate: rate,
+});
+
+// the grand total of a booking whose payment method is known, as the invoice rows show it
+function paidTotals(quote) {
+  const t = bookingTotals(quote);
+  return { ...t, feeLabel: t.rate === null ? 'Processing fee' : `Processing fee (${pct(t.rate)})` };
+}
+
+/**
+ * Ways to pay, with what each method actually costs. `columns` give the sum due at
+ * a fee rate, e.g. [{ label: 'In full', at: (rate) => amount }]; `note` qualifies them.
+ */
+const paymentMethodsText = (columns, note = '') => `Ways to pay${note ? ` (${note})` : ''}:\n`
+  + feeTiers().map((t) => `- ${t.names} (${t.fee}): `
+    + columns.map((c) => `${money(c.at(t.rate))} ${c.label.toLowerCase()}`).join(', ')).join('\n');
+
+const paymentMethods = (columns, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
-  <tr><td colspan="2" class="tr-cell" style="padding:12px 16px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-                             color:${BRAND.muted};font-family:${FONT};">Ways to pay</td></tr>
-  ${feeTiers({ noCash }).map((t) => `
   <tr>
-    <td class="tr-cell" style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};
-               border-top:1px solid ${BRAND.line};">${esc(t.names)}</td>
-    <td align="right" class="tr-cell" style="padding:10px 16px;font-size:13px;font-weight:700;font-family:${FONT};white-space:nowrap;
-               color:${t.fee === 'No fee' ? BRAND.good : BRAND.text};border-top:1px solid ${BRAND.line};">${esc(t.fee)}</td>
+    <td class="tr-cell" style="${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;">${esc(note)}</span>` : ''}</td>
+    ${columns.map((c) => `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">${esc(c.label)}</td>`).join('')}
+  </tr>
+  ${feeTiers().map((t) => `
+  <tr>
+    <td class="tr-cell" style="padding:10px 16px;font-family:${FONT};${ROW_RULE}">
+      <div style="font-size:14px;color:${BRAND.text};">${esc(t.names)}</div>
+      <div style="font-size:12px;font-weight:700;padding-top:2px;color:${t.rate ? BRAND.muted : BRAND.good};">${esc(t.fee)}</div>
+    </td>
+    ${columns.map((c) => `<td align="right" class="tr-cell" style="padding:10px 16px;font-size:14px;font-weight:700;color:${BRAND.text};
+               font-family:${FONT};white-space:nowrap;${ROW_RULE}">${money(c.at(t.rate))}</td>`).join('')}
   </tr>`).join('')}
 </table>`
-  + para(`<span style="font-size:12px;color:${BRAND.muted};">Any processing fee is added at checkout for the method you choose. `
-    + `${paypalConfigured() ? 'Apple Pay, Google Pay and Venmo' : 'Apple Pay and Google Pay'} available on supported devices.`
-    + `${cashFullOnly ? ' Cash is accepted for full payment only.' : ''}</span>`);
+    + para(`<span style="font-size:12px;color:${BRAND.muted};">Totals include each method's processing fee. `
+      + `${paypalConfigured() ? 'Apple Pay, Google Pay and Venmo' : 'Apple Pay and Google Pay'} available on supported devices.</span>`);
 
 async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const ttl = process.env.QUOTE_LINK_TTL_DAYS || 7;
@@ -492,43 +552,58 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const vehicleName = quote.vehicle?.name || 'A vehicle';
   const depositPct = pct(quoteDepositRate(quote));
   const chooses = !!quote.gratuity?.customerChooses;
+  // prose quotes the card price; the ways-to-pay table lists every method's
+  const cardRate = processingFeeRate('card');
+  const card = quotePrice(quote, cardRate);
+  const total = money(card.total);
+  const deposit = depositAmount ? money(card.deposit.amount) : null;
+  const payColumns = depositAmount
+    ? [{ label: 'In full', at: (r) => quotePrice(quote, r).total }, { label: 'Deposit', at: (r) => quotePrice(quote, r).deposit.amount }]
+    : [{ label: 'Total', at: (r) => quotePrice(quote, r).total }];
+  const payNote = chooses ? 'before gratuity' : '';
+  const totals = {
+    fee: card.fee,
+    feeLabel: `Card processing fee (${pct(cardRate)})`,
+    total: card.total,
+    totalLabel: chooses ? 'Total by card, before gratuity' : 'Total by card',
+  };
   await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: offer ? 'A vehicle is available for your trip' : 'Your Tour Rider quote is ready',
     text: `Hello ${quote.customer.name},\n\n`
       + (offer
-        ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${money(quote.quotedAmount)}.\n`
-        : `We can cover this trip for ${money(quote.quotedAmount)}.\n`)
-      + (chooses ? `Gratuity, your choice: ${gratuityChoices(quote)}. ${GRATUITY_HOW}\n\n` : '')
+        ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${total} by card.\n`
+        : `We can cover this trip for ${total} by card.\n`)
+      + (chooses ? `${gratuityChoiceText(quote)}\n${GRATUITY_HOW}\n\n` : '')
       + (depositAmount
-        ? `Pay in full today or secure your booking with a ${depositPct} deposit of ${money(depositAmount)}.\n\n`
+        ? `Pay in full today or secure your booking with a ${depositPct} deposit of ${deposit}.\n\n`
           + `Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
           + 'will be automatically charged to the same card on arrival of the vehicle.\n\n'
         : 'Payment in full confirms your booking.\n\n')
-      + `${paymentMethodsText()}\n${CARD_HOLD_NOTE}\n\n`
+      + `${paymentMethodsText(payColumns, payNote)}\n${CARD_HOLD_NOTE}\n\n`
       + `Complete your booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
     html: shell({
       heading: offer ? 'A vehicle is available' : 'Your quote is ready',
       preheader: offer
-        ? `${vehicleName} for ${money(quote.quotedAmount)} on ${quote.date}`
-        : `${money(quote.quotedAmount)} for your trip on ${quote.date}`,
+        ? `${vehicleName} for ${total} on ${quote.date}`
+        : `${total} for your trip on ${quote.date}`,
       body:
         para(`Hello ${esc(quote.customer.name)},`)
         + (offer
           ? para('Good news! We’ve secured a vehicle for your trip. If you’re happy with the quoted price, please proceed with completing your booking.')
             + vehicleCard(quote.vehicle)
           : para('Thanks for your request — we can cover this trip.'))
-        + amountPanel(chooses ? 'Total before gratuity' : 'Total quote', money(quote.quotedAmount))
-        + invoiceTable(quote)
+        + amountPanel(chooses ? 'Total before gratuity' : 'Total', total, 'By card. Every payment method is listed below.')
+        + invoiceTable(quote, totals)
         + (chooses ? gratuityChoice(quote) : '')
         + detailRows(tripRows(quote))
         + (depositAmount
-          ? para(`Pay in full today or secure your booking with a <strong>${depositPct} deposit of ${money(depositAmount)}</strong>.`)
+          ? para(`Pay in full today or secure your booking with a <strong>${depositPct} deposit of ${deposit}</strong>.`)
             + para(`Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
               + 'will be automatically charged to the same card on arrival of the vehicle.')
           : para('Payment in full confirms your booking.'))
-        + paymentMethods({ cashFullOnly: !!depositAmount })
+        + paymentMethods(payColumns, payNote)
         + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(CARD_HOLD_NOTE)}</span>`)
         + button(paymentUrl, 'Complete your booking')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you and expires in ${esc(ttl)} days. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
@@ -632,10 +707,10 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
           money(amount),
           isDeposit ? balanceNote(plan) : 'Nothing further is due'
         )
-        + invoiceTable(quote)
+        + invoiceTable(quote, paidTotals(quote))
         + detailRows([
           ...tripRows(quote),
-          ['Total', money(bookingTotal(quote))],
+          ['Total', money(paidTotals(quote).total)],
           quote.paymentMethod ? ['Paid with', methodName(quote.paymentMethod)] : null,
           quote.gratuity?.method ? ['Gratuity', gratuityLabel(quote.gratuity)] : null,
           isDeposit ? ['Balance remaining', money(plan.amount)] : null,
@@ -670,12 +745,13 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
   ])).filter(Boolean);
 
   const c = quote.customer;
+  const balance = isDeposit ? balanceNote(balancePlan(quote)) : '';
   await sendMail({
     from: FROM(),
     to,
     attachments,
     subject: `Booking confirmed — ${c.name}`,
-    text: `${c.name} has paid ${money(amount)}${isDeposit ? ` (deposit, ${money(quote.remainingBalance)} due on pickup day)` : ' in full'}.\n`
+    text: `${c.name} has paid ${money(amount)}${isDeposit ? ` (deposit; ${balance.charAt(0).toLowerCase()}${balance.slice(1)})` : ' in full'}.\n`
       + `Contact: ${c.phone ? `${c.phone} / ` : ''}${c.email}\n`
       + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
       + `Attached: Itinerary with no pricing, customer's invoice and a calendar invite.`,
@@ -686,8 +762,8 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
       body:
         para(`<strong>${esc(c.name)}</strong> has paid and the trip is confirmed.`)
         + amountPanel(isDeposit ? 'Deposit received' : 'Paid in full', money(amount),
-          isDeposit ? `${money(quote.remainingBalance)} due on the day of pickup` : 'Nothing further is due')
-        + invoiceTable(quote)
+          isDeposit ? balance : 'Nothing further is due')
+        + invoiceTable(quote, paidTotals(quote))
         + detailRows([
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
@@ -782,13 +858,14 @@ async function sendBalanceChargeFailed(quote, reason) {
 // balance is asked for by link on the morning of the trip instead.
 async function sendBalanceLink(quote, paymentUrl) {
   const c = quote.customer;
-  const due = money(quote.remainingBalance);
+  const due = money(balancePlan(quote).amount);
+  const columns = [{ label: 'Balance', at: (r) => balanceDue(quote, r).amount }];
   await sendMail({
     from: FROM(),
     to: [c.email],
     subject: `Balance due today for your Tour Rider trip — ${due}`,
     text: `Hello ${c.name},\n\nYour trip is today and the remaining balance of ${due} is now due.\n\n`
-      + `${paymentMethodsText()}\n\n`
+      + `${paymentMethodsText(columns)}\n\n`
       + `Pay the balance: ${paymentUrl}\n\n`
       + `Paying before pickup keeps things simple for you and your driver.`,
     html: shell({
@@ -797,9 +874,9 @@ async function sendBalanceLink(quote, paymentUrl) {
       body:
         para(`Hello ${esc(c.name)},`)
         + para('Your trip is today. Because your deposit was paid with a method we cannot charge again, the balance needs settling with this link.')
-        + amountPanel('Balance due', due, `Already paid ${money(quote.amountPaid)}`)
+        + amountPanel('Balance due', due, `By ${methodName(quote.paymentMethod)}, as your deposit · already paid ${money(quote.amountPaid)}`)
         + detailRows(tripRows(quote))
-        + paymentMethods()
+        + paymentMethods(columns)
         + button(paymentUrl, 'Pay the balance')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),
@@ -812,22 +889,23 @@ async function sendAdminBalanceLinkSent(quote) {
   if (!to.length) return;
 
   const c = quote.customer;
+  const outstanding = money(balancePlan(quote).amount);
   await sendMail({
     from: FROM(),
     to,
-    subject: `Balance link sent to ${c.name} — ${money(quote.remainingBalance)} outstanding`,
+    subject: `Balance link sent to ${c.name} — ${outstanding} outstanding`,
     text: `${c.name} paid their deposit by ${quote.paymentMethod || 'an uncharged method'}, so there is no card on file.\n`
-      + `A payment link for ${money(quote.remainingBalance)} has been emailed to ${c.email}.\n`
+      + `A payment link for ${outstanding} has been emailed to ${c.email}.\n`
       + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
       + `Reference: ${refOf(quote)}\n\n`
       + `Check it has been paid before the vehicle leaves.`,
     html: shell({
       heading: 'Balance link sent',
       accent: BRAND.accent,
-      preheader: `${money(quote.remainingBalance)} still to collect from ${c.name}`,
+      preheader: `${outstanding} still to collect from ${c.name}`,
       body:
         para(`<strong>${esc(c.name)}</strong> paid the deposit by ${esc(quote.paymentMethod || 'a method that cannot be charged again')}, so no card is held on file.`)
-        + amountPanel('Outstanding', money(quote.remainingBalance), 'Payment link emailed to the customer')
+        + amountPanel('Outstanding', outstanding, 'Processing fee included · payment link emailed to the customer')
         + detailRows([
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
@@ -969,7 +1047,7 @@ async function sendExtraCharge(quote, charge, paymentUrl = null) {
         + detailRows(rows)
         + detailRows(tripRows(quote))
         + (paymentUrl
-          ? paymentMethods({ noCash: true })
+          ? paymentMethods([{ label: 'Total', at: (r) => withFee(charge.amount, r) }])
             + button(paymentUrl, 'Pay now')
             + para(`<span style="font-size:12px;color:${BRAND.muted};">If the button doesn't work, paste this into your browser:<br>`
               + `<span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`)

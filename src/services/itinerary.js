@@ -6,12 +6,11 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const { formatInZone, zonedToUtc } = require('../helpers/datetime.js');
 const { round2 } = require('../helpers/pricing.js');
-const { balancePlan } = require('../helpers/paymentMethods.js');
+const { balancePlan, bookingTotals } = require('../helpers/paymentMethods.js');
 const { stopRows } = require('../helpers/stops.js');
-const { bookingTotal } = require('../helpers/gratuity.js');
 
 const METHOD_LABELS = {
-  card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App Pay',
+  card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App',
   paypal: 'PayPal', venmo: 'Venmo', zelle: 'Zelle', cash: 'cash',
 };
 
@@ -192,8 +191,10 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     row('Base fare', money(quote.baseFare ?? quote.quotedAmount));
     (quote.lineItems || []).forEach((l) => row(l.label, money(l.amount)));
     const tip = quote.gratuity?.method ? quote.gratuity : null;
+    const totals = bookingTotals(quote);
+    if (totals.fee > 0) row(`Processing fee${totals.rate ? ` (${round2(totals.rate * 100)}%)` : ''}`, money(totals.fee));
     if (tip?.method === 'online') row(`Gratuity (${tip.percent}%)`, money(tip.amount));
-    row('Total', money(bookingTotal(quote)), { strong: true });
+    row('Total', money(totals.total), { strong: true });
     if (tip?.method === 'cash') row(`Gratuity (${tip.percent}%), cash to driver`, money(tip.amount));
     y += 10;
 
