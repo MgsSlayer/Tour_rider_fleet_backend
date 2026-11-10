@@ -257,54 +257,32 @@ const invoiceTable = (q, totals) => {
 </table>`;
 };
 
-const CARD_HOLD_NOTE = 'Paying by card? Your card is kept on file until 48 hours after your trip, '
-  + 'for any damage or cleaning charges, then removed.';
-
 const GRATUITY_HOW = 'Choose your gratuity option at checkout. You can add it to your online payment or pay your driver in cash. '
-  + 'If you pay a deposit, any gratuity added online will be charged with the remaining balance.';
+  + 'If you pay a deposit, any gratuity added online will be charged with the remaining balance. '
+  + 'You will see your total with gratuity when you complete your payment.';
 
 // header and row rules shared by the price tables, so gratuity reads like the ways to pay
 const TABLE_HEAD = `padding:12px 16px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:${BRAND.muted};font-family:${FONT};`;
 const ROW_RULE = `border-top:1px solid ${BRAND.line};`;
 
-// what each gratuity choice brings the booking to by card; the deposit is the same whichever is picked
-function gratuityPrices(q) {
-  const rate = processingFeeRate('card');
-  const rows = gratuityOptions(q).map((o) => ({ ...o, price: quotePrice(q, rate, o.amount) }));
-  return { rows, deposit: quotePrice(q, rate).deposit?.amount ?? null };
-}
-
-const gratuityNote = (deposit) => `by card${deposit === null ? '' : ` · deposit ${money(deposit)}`}`;
-
 // the customer's gratuity choices, shown before they reach the payment page
-const gratuityChoiceText = (q) => {
-  const { rows, deposit } = gratuityPrices(q);
-  return `Gratuity (your choice at checkout, ${gratuityNote(deposit)}):\n`
-    + rows.map((r) => `- ${r.percent}% (${money(r.amount)}): ${money(r.price.total)} in full`
-      + (deposit === null ? '' : `, ${money(r.price.balance.amount)} balance`)).join('\n');
-};
+const gratuityChoiceText = (q) => 'Gratuity (your choice at checkout):\n'
+  + gratuityOptions(q).map((o) => `- ${o.percent}%: ${money(o.amount)}`).join('\n');
 
-// laid out like the ways to pay: what paying in full, or the balance after a deposit, comes to with each choice
-const gratuityChoice = (q) => {
-  const { rows, deposit } = gratuityPrices(q);
-  const cell = `padding:10px 16px;font-size:14px;font-weight:700;color:${BRAND.text};font-family:${FONT};white-space:nowrap;${ROW_RULE}`;
-  return `
+const gratuityChoice = (q) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
-    <td class="tr-cell" style="${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">${esc(gratuityNote(deposit))}</span></td>
-    <td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">In full</td>
-    ${deposit === null ? '' : `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">Balance</td>`}
+    <td class="tr-cell" style="${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">your choice at checkout</span></td>
+    <td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">Amount</td>
   </tr>
-  ${rows.map((r) => `
+  ${gratuityOptions(q).map((o) => `
   <tr>
-    <td class="tr-cell" style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};${ROW_RULE}">${r.percent}% · ${money(r.amount)}</td>
-    <td align="right" class="tr-cell" style="${cell}">${money(r.price.total)}</td>
-    ${deposit === null ? '' : `<td align="right" class="tr-cell" style="${cell}">${money(r.price.balance.amount)}</td>`}
+    <td class="tr-cell" style="padding:10px 16px;font-size:14px;color:${BRAND.text};font-family:${FONT};${ROW_RULE}">${o.percent}%</td>
+    <td align="right" class="tr-cell" style="padding:10px 16px;font-size:14px;font-weight:700;color:${BRAND.text};font-family:${FONT};white-space:nowrap;${ROW_RULE}">${money(o.amount)}</td>
   </tr>`).join('')}
 </table>`
-    + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(GRATUITY_HOW)}</span>`);
-};
+  + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(GRATUITY_HOW)}</span>`);
 
 // what the customer quotes back to us; older bookings may only have the database id
 const refOf = (q) => q.reservationNumber || String(q._id);
@@ -506,9 +484,9 @@ function feeTiers() {
 // a sum with one method's processing fee, rounded exactly as checkout rounds it
 const withFee = (amount, rate) => round2(Number(amount) + round2(Number(amount) * rate));
 
-// the booking's figures at one fee rate, before any gratuity the customer has still to choose unless one is given
-const quotePrice = (quote, rate, gratuity = 0) => priceBooking({
-  quotedAmount: quote.quotedAmount, gratuity, depositRate: quoteDepositRate(quote), feeRate: rate,
+// the booking's figures at one fee rate, before any gratuity the customer has still to choose
+const quotePrice = (quote, rate) => priceBooking({
+  quotedAmount: quote.quotedAmount, depositRate: quoteDepositRate(quote), feeRate: rate,
 });
 
 // the grand total of a booking whose payment method is known, as the invoice rows show it
@@ -581,7 +559,7 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
           + `Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
           + 'will be automatically charged to the same card on arrival of the vehicle.\n\n'
         : 'Payment in full confirms your booking.\n\n')
-      + `${paymentMethodsText(payColumns, payNote)}\n${CARD_HOLD_NOTE}\n\n`
+      + `${paymentMethodsText(payColumns, payNote)}\n\n`
       + `Complete your booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
     html: shell({
       heading: offer ? 'A vehicle is available' : 'Your quote is ready',
@@ -604,7 +582,6 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
               + 'will be automatically charged to the same card on arrival of the vehicle.')
           : para('Payment in full confirms your booking.'))
         + paymentMethods(payColumns, payNote)
-        + para(`<span style="font-size:12px;color:${BRAND.muted};">${esc(CARD_HOLD_NOTE)}</span>`)
         + button(paymentUrl, 'Complete your booking')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you and expires in ${esc(ttl)} days. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),

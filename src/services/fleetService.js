@@ -63,6 +63,21 @@ function minTripHours(v) {
   return large ? PARTY_BUS_MIN_HOURS : MIN_TRIP_HOURS;
 }
 
+// sheet types that cover Sprinter vans and buses alike, so the vehicle itself decides
+const MIXED_TYPES = ['standard', 'executive', 'jet', 'multipurpose'];
+
+/** The kind of vehicle in plain words (Party Bus, Van, Bus, Coach, SUV…) for the documents customers and drivers read. */
+function vehicleTypeLabel(v) {
+  const type = String(v?.type || '').trim();
+  const t = type.toLowerCase();
+  const sprinter = /sprinter|mercedes/i.test(`${v?.name || ''} ${v?.model || ''}`);
+  if (t.includes('party')) return type;
+  if (t.includes('bus')) return 'Bus';
+  if (MIXED_TYPES.some((m) => t.includes(m))) return sprinter ? 'Van' : 'Bus';
+  if (/[a-z]/.test(t)) return type;
+  return sprinter ? 'Van' : (v?.name || 'Assigned vehicle');
+}
+
 /**
  * Vehicles that fit the request, smallest that seats everyone first. Vehicles
  * without a photo are left out because the fleet page hides them too.
@@ -90,5 +105,5 @@ const wantsLabel = (wants = {}) => [
 ].filter(Boolean).join(' · ');
 
 module.exports = {
-  fetchFleet, matchFleet, wantsLabel, minTripHours, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
+  fetchFleet, matchFleet, wantsLabel, minTripHours, vehicleTypeLabel, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
 };

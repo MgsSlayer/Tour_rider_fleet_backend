@@ -4,10 +4,12 @@
 const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
-const { formatInZone, zonedToUtc } = require('../helpers/datetime.js');
+const { formatInZone, zonedToUtc, tripMinutes } = require('../helpers/datetime.js');
 const { round2 } = require('../helpers/pricing.js');
 const { balancePlan, bookingTotals } = require('../helpers/paymentMethods.js');
 const { stopRows } = require('../helpers/stops.js');
+const { minTripHours, vehicleTypeLabel } = require('./fleetService.js');
+const { formatDuration } = require('./suggestService.js');
 
 const METHOD_LABELS = {
   card: 'card', apple_pay: 'Apple Pay', google_pay: 'Google Pay', cash_app: 'Cash App',
@@ -42,14 +44,25 @@ function contactLines(customer) {
   return lines;
 }
 
+// the booked time, or the vehicle's minimum when the booking is shorter; unknown without a drop-off time
+function tripDuration(quote) {
+  if (!quote.finalDropoffTime) return null;
+  const booked = tripMinutes(quote.date, quote.pickupTime, quote.finalDropoffTime);
+  if (booked === null) return null;
+  const minimum = minTripHours(quote.vehicle) * 60;
+  return booked < minimum ? `${formatDuration(minimum)} (minimum)` : formatDuration(booked);
+}
+
 function itineraryRows(quote) {
+  const duration = tripDuration(quote);
   const rows = [
-    ['Vehicle', quote.vehicle?.name || quote.vehicle?.type || 'Assigned vehicle'],
-    ['Trip type', quote.tripType],
+    ['Vehicle type', vehicleTypeLabel(quote.vehicle)],
     ['Passengers', String(quote.passengers)],
+    ['Trip type', quote.tripType],
+    duration ? ['Duration', duration] : null,
     ['Pick-up', formatInZone(new Date(quote.pickupDateTime))],
     ['Pick-up address', quote.pickupAddress],
-  ];
+  ].filter(Boolean);
   stopRows(quote).forEach((row) => rows.push(row));
   rows.push(['Drop-off address', quote.dropoffAddress]);
   if (quote.finalDropoffTime) rows.push(['Final drop-off', `${quote.finalDropoffTime} (${quote.date})`]);
@@ -61,10 +74,22 @@ function itineraryRows(quote) {
   return rows;
 }
 
+// room kept at the foot of the page for the footer
+const FOOTER_SPACE = 84;
+
+/** Where to draw a block of `height`: here, or at the top of a new page if it would run into the footer. */
+function fit(doc, y, height) {
+  if (y + height <= doc.page.height - FOOTER_SPACE - 14) return y;
+  doc.addPage();
+  return doc.page.margins.top;
+}
+
 /** Brand footer, shared by the itinerary and the invoice. */
 function drawFooter(doc, left, right, note) {
-  // must clear the bottom margin, or pdfkit spills the last line onto a new page
-  const base = doc.page.height - 118;
+  const base = doc.page.height - FOOTER_SPACE;
+  // the footer sits inside the bottom margin, so the margin is lifted while it draws or pdfkit starts a new page
+  const { bottom } = doc.page.margins;
+  doc.page.margins.bottom = 0;
   doc.fillColor(INK).fontSize(11).font('Helvetica-Bold')
     .text('TOUR RIDER', left, base, { width: right - left, align: 'center', characterSpacing: 1.4 });
   doc.fillColor(MUTED).fontSize(8).font('Helvetica')
@@ -74,6 +99,7 @@ function drawFooter(doc, left, right, note) {
     doc.fillColor('#9ca3af').fontSize(7)
       .text(note, left, base + 44, { width: right - left, align: 'center' });
   }
+  doc.page.margins.bottom = bottom;
 }
 
 /** Draws the branded header band; `kind` labels the document. */
@@ -114,12 +140,15 @@ function buildItineraryPDF(quote) {
     y += 26;
 
     const section = (title, rows) => {
+      // a heading never sits alone at the foot of a page
+      y = fit(doc, y, 40);
       doc.fillColor(MUTED).fontSize(8).font('Helvetica-Bold')
         .text(title.toUpperCase(), left, y, { characterSpacing: 1.2 });
       y += 16;
       rows.forEach(([k, v]) => {
         const text = String(v ?? '');
         const h = Math.max(doc.heightOfString(text, { width: right - left - 130 }), 12);
+        y = fit(doc, y, h + 9);
         doc.fillColor(MUTED).fontSize(9).font('Helvetica').text(k, left, y, { width: 120 });
         doc.fillColor(INK).fontSize(10).font('Helvetica-Bold')
           .text(text, left + 130, y - 1, { width: right - left - 130 });
@@ -162,25 +191,39 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
       .text([quote.customer?.email, quote.customer?.phone].filter(Boolean).join('  ·  '), left, y);
     y += 26;
 
+    // wide enough for an address on one line; the label column keeps the rest
+    const VALUE_W = 300;
+    // pitch of a one-line row, plain and bold, so a block's height can be known before it is drawn
+    const ROW = 20;
+    const STRONG_ROW = 25;
     const row = (label, value, opts = {}) => {
-      const height = Math.max(doc.heightOfString(String(value), { width: 200 }), 12);
+      const height = Math.max(doc.heightOfString(String(value), { width: VALUE_W }),
+        doc.heightOfString(label, { width: right - left - VALUE_W - 10 }), 12);
+      y = fit(doc, y, height + (opts.strong ? STRONG_ROW : ROW) - 12);
       doc.fillColor(opts.strong ? INK : MUTED)
         .fontSize(opts.strong ? 11 : 9.5)
         .font(opts.strong ? 'Helvetica-Bold' : 'Helvetica')
-        .text(label, left, y, { width: right - left - 210 });
+        .text(label, left, y, { width: right - left - VALUE_W - 10 });
       doc.fillColor(INK).fontSize(opts.strong ? 12 : 10)
         .font(opts.strong ? 'Helvetica-Bold' : 'Helvetica')
-        .text(String(value), right - 200, y - 1, { width: 200, align: 'right' });
-      y += height + 8;
+        .text(String(value), right - VALUE_W, y - 1, { width: VALUE_W, align: 'right' });
+      y += height + 7;
       doc.moveTo(left, y - 3).lineTo(right, y - 3)
         .lineWidth(opts.strong ? 1 : 0.5).strokeColor(opts.strong ? MUTED : LINE).stroke();
-      y += opts.strong ? 6 : 2;
+      y += opts.strong ? 6 : 1;
     };
 
-    const section = (title) => {
+    // `keep` is how much of the section must fit before it starts, so it isn't split awkwardly
+    const section = (title, keep = 40) => {
+      y = fit(doc, y, keep);
       doc.fillColor(MUTED).fontSize(8).font('Helvetica-Bold')
         .text(title.toUpperCase(), left, y, { characterSpacing: 1.2 });
       y += 16;
+    };
+    const note = (text, height) => {
+      y = fit(doc, y, height);
+      doc.fillColor(MUTED).fontSize(8.5).font('Helvetica').text(text, left, y, { width: right - left });
+      y += height;
     };
 
     section('Trip');
@@ -198,9 +241,11 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     if (tip?.method === 'cash') row(`Gratuity (${tip.percent}%), cash to driver`, money(tip.amount));
     y += 10;
 
-    section('Payment');
     const fee = Number(quote.processingFee || 0);
     const method = METHOD_LABELS[quote.paymentMethod] || null;
+    const owes = isDeposit && quote.remainingBalance > 0;
+    // the payment block reads as one, so it moves to the next page whole when it can't fit
+    section('Payment', 16 + (fee > 0 ? 2 * ROW : 0) + STRONG_ROW + (method ? 14 : 0) + (owes ? ROW + 22 : 22));
     // a surcharge has to be visible on the receipt, not folded into one figure
     if (fee > 0) {
       row(isDeposit ? 'Deposit' : 'Amount', money(round2(amountPaid - fee)));
@@ -208,25 +253,17 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
       row(`Processing fee${pct}`, money(fee));
     }
     row(isDeposit ? 'Deposit paid' : 'Paid in full', money(amountPaid), { strong: true });
-    if (method) {
-      doc.fillColor(MUTED).fontSize(8.5).font('Helvetica')
-        .text(`Paid by ${method}.`, left, y, { width: right - left });
-      y += 14;
-    }
-    if (isDeposit && quote.remainingBalance > 0) {
+    if (method) note(`Paid by ${method}.`, 14);
+    if (owes) {
       const plan = balancePlan(quote);
       row(plan.how === 'link' ? 'Balance due on pickup day' : 'Balance due on arrival', money(plan.amount));
-      doc.fillColor(MUTED).fontSize(8.5).font('Helvetica')
-        .text({
-          card: 'The balance, including the processing fee, will be charged automatically to the card on file on arrival of your vehicle.',
-          zelle: 'The balance is due via Zelle on arrival of the vehicle.',
-          link: 'We will email you a payment link for the balance on the morning of your trip.',
-        }[plan.how], left, y, { width: right - left });
-      y += 22;
+      note({
+        card: 'The balance, including the processing fee, will be charged automatically to the card on file on arrival of your vehicle.',
+        zelle: 'The balance is due via Zelle on arrival of the vehicle.',
+        link: 'We will email you a payment link for the balance on the morning of your trip.',
+      }[plan.how], 22);
     } else {
-      doc.fillColor(MUTED).fontSize(8.5).font('Helvetica')
-        .text('Nothing further is due.', left, y, { width: right - left });
-      y += 22;
+      note('Nothing further is due.', 22);
     }
 
     drawFooter(doc, left, right, 'Thank you for choosing Tour Rider.');
@@ -256,6 +293,7 @@ function buildChargeInvoicePDF(quote, charge) {
 
     const row = (label, value, opts = {}) => {
       const height = Math.max(doc.heightOfString(String(value), { width: 260 }), 12);
+      y = fit(doc, y, height + 16);
       doc.fillColor(opts.strong ? INK : MUTED).fontSize(opts.strong ? 11 : 9.5)
         .font(opts.strong ? 'Helvetica-Bold' : 'Helvetica')
         .text(label, left, y, { width: right - left - 270 });
@@ -267,12 +305,13 @@ function buildChargeInvoicePDF(quote, charge) {
       y += opts.strong ? 6 : 2;
     };
     const section = (title) => {
+      y = fit(doc, y, 40);
       doc.fillColor(MUTED).fontSize(8).font('Helvetica-Bold').text(title.toUpperCase(), left, y, { characterSpacing: 1.2 });
       y += 16;
     };
 
     section('Trip');
-    row('Vehicle', quote.vehicle?.name || quote.vehicle?.type || 'Assigned vehicle');
+    row('Vehicle type', vehicleTypeLabel(quote.vehicle));
     row('Pick-up', formatInZone(new Date(quote.pickupDateTime)));
     row('Pick-up address', quote.pickupAddress);
     row('Drop-off address', quote.dropoffAddress);
@@ -287,6 +326,7 @@ function buildChargeInvoicePDF(quote, charge) {
     row(settled ? 'Total paid' : 'Amount due', money(settled ? charge.total : charge.amount), { strong: true });
 
     const method = METHOD_LABELS[charge.method] || null;
+    y = fit(doc, y, 24);
     doc.fillColor(MUTED).fontSize(8.5).font('Helvetica').text(
       charge.status === 'charged' ? 'Charged to the card on file.'
         : settled ? `Paid${method ? ` by ${method}` : ''}.`
