@@ -194,15 +194,20 @@ const shell = ({ heading, accent = BRAND.gold, body, preheader = '' }) => `<!doc
 
 const para = (html) => `<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:${BRAND.text};font-family:${FONT};">${html}</p>`;
 
+// Some mail apps ignore a table's own width and shrink a box to its text. A cell set to
+// full width beside another cell forces the table to fill the line anyway, so every box
+// gives its stretchiest cell width="100%", and a box with one cell adds this 1px partner.
+const FILL_PARTNER = '<td style="padding:0 0 0 1px;font-size:0;line-height:0;"></td>';
+
 // the headline number — quote total, amount charged, etc.
 const amountPanel = (label, value, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="width:100%;background:#fffaf0;border:1px solid rgba(245,166,35,.45);border-radius:10px;margin:0 0 22px;">
-  <tr><td align="center" class="tr-cell" style="padding:20px 16px;font-family:${FONT};">
+  <tr><td align="center" width="100%" class="tr-cell" style="width:100%;padding:20px 16px;font-family:${FONT};">
     <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:${BRAND.muted};">${esc(label)}</div>
     <div style="font-size:32px;font-weight:700;color:${BRAND.ink};padding-top:4px;">${esc(value)}</div>
     ${note ? `<div style="font-size:12px;color:${BRAND.muted};padding-top:6px;">${esc(note)}</div>` : ''}
-  </td></tr>
+  </td>${FILL_PARTNER}</tr>
 </table>`;
 
 const detailRows = (rows) => `
@@ -213,7 +218,7 @@ const detailRows = (rows) => `
     <td class="tr-cell" style="padding:11px 16px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;
                color:${BRAND.muted};font-family:${FONT};white-space:nowrap;
                ${i ? `border-top:1px solid ${BRAND.line};` : ''}">${esc(k)}</td>
-    <td align="right" class="tr-cell" style="padding:11px 16px;font-size:14px;color:${BRAND.text};font-weight:600;
+    <td align="right" width="100%" class="tr-cell" style="width:100%;padding:11px 16px;font-size:14px;color:${BRAND.text};font-weight:600;
                font-family:${FONT};${i ? `border-top:1px solid ${BRAND.line};` : ''}">${esc(v)}</td>
   </tr>`).join('')}
 </table>`;
@@ -236,7 +241,7 @@ const invoiceTable = (q, totals) => {
 
   const row = (label, value, opts = {}) => `
   <tr>
-    <td class="tr-cell" style="padding:10px 16px;font-size:13px;color:${opts.strong ? BRAND.text : BRAND.muted};
+    <td width="100%" class="tr-cell" style="width:100%;padding:10px 16px;font-size:13px;color:${opts.strong ? BRAND.text : BRAND.muted};
                font-family:${FONT};${opts.top ? `border-top:1px solid ${BRAND.line};` : ''}
                ${opts.strong ? 'font-weight:700;' : ''}">${esc(label)}</td>
     <td align="right" class="tr-cell" style="padding:10px 16px;font-size:${opts.strong ? '16px' : '14px'};
@@ -272,7 +277,7 @@ const gratuityChoice = (q) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
-    <td class="tr-cell" style="${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">your choice at checkout</span></td>
+    <td width="100%" class="tr-cell" style="width:100%;${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">your choice at checkout</span></td>
     <td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">Amount</td>
   </tr>
   ${gratuityOptions(q).map((o) => `
@@ -302,10 +307,10 @@ const tripRows = (q) => [
 const messageBlock = (message) => (message
   ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
             style="width:100%;background:#fafafa;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 20px;">
-       <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+       <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
          <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                       color:${BRAND.muted};padding-bottom:5px;">Message</span>${esc(message)}
-       </td></tr></table>`
+       </td>${FILL_PARTNER}</tr></table>`
   : '');
 
 async function sendAdminNewRequest(quote) {
@@ -375,7 +380,7 @@ const matchTable = (vehicles, tripNote) => `
     const own = ownMinimum(m, tripNote);
     return `
   <tr>
-    <td class="tr-cell" style="padding:11px 16px;font-family:${FONT};${top}">
+    <td width="100%" class="tr-cell" style="width:100%;padding:11px 16px;font-family:${FONT};${top}">
       <div style="font-size:14px;font-weight:600;color:${BRAND.text};">${esc(m.name)}</div>
       <div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(matchMeta(m))}</div>
       ${own ? `<div style="font-size:12px;color:${BRAND.muted};padding-top:2px;">${esc(own)}</div>` : ''}
@@ -450,13 +455,13 @@ const vehicleCard = (v = {}) => {
   return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;overflow:hidden;">
-  ${photo ? `<tr><td style="font-size:0;line-height:0;"><img src="${esc(photo)}" alt="${esc(v.name)}" width="536"
+  ${photo ? `<tr><td colspan="2" style="font-size:0;line-height:0;"><img src="${esc(photo)}" alt="${esc(v.name)}" width="536"
        style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:10px 10px 0 0;"></td></tr>` : ''}
-  <tr><td class="tr-cell" style="padding:14px 16px;font-family:${FONT};">
+  <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-family:${FONT};">
     <div style="font-size:16px;font-weight:700;color:${BRAND.text};">${esc(v.name || 'Your vehicle')}</div>
     ${meta ? `<div style="font-size:13px;color:${BRAND.muted};padding-top:3px;">${esc(meta)}</div>` : ''}
     ${more ? `<div style="font-size:13px;padding-top:8px;"><a href="${esc(more)}" style="color:${BRAND.gold};font-weight:600;">See more photos</a></div>` : ''}
-  </td></tr>
+  </td>${FILL_PARTNER}</tr>
 </table>`;
 };
 
@@ -507,7 +512,7 @@ const paymentMethods = (columns, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
-    <td class="tr-cell" style="${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;font-weight:700;color:${BRAND.text};">${esc(note)}</span>` : ''}</td>
+    <td width="100%" class="tr-cell" style="width:100%;${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;font-weight:700;color:${BRAND.text};">${esc(note)}</span>` : ''}</td>
     ${columns.map((c) => `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">${esc(c.label)}</td>`).join('')}
   </tr>
   ${feeTiers().map((t) => `
@@ -598,10 +603,10 @@ async function sendQuoteDeclined(quote) {
         + (quote.declineReason
           ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
                     style="width:100%;background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
-               <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+               <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
                  <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                               color:${BRAND.muted};padding-bottom:5px;">Reason</span>${esc(quote.declineReason)}
-               </td></tr></table>`
+               </td>${FILL_PARTNER}</tr></table>`
           : '')
         + detailRows(tripRows(quote))
         + para("If your dates or vehicle are flexible, just reply to this email — we'll do our best to find an alternative.")
@@ -801,10 +806,10 @@ async function sendBalanceChargeFailed(quote, reason) {
         + amountPanel('Uncollected', attempted, 'The card was not charged')
         + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
                   style="width:100%;background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
-             <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+             <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
                <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                             color:${BRAND.muted};padding-bottom:5px;">Reason given by Square</span>${esc(reason)}
-             </td></tr></table>`
+             </td>${FILL_PARTNER}</tr></table>`
         + detailRows([
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
