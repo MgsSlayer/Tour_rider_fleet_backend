@@ -3,7 +3,6 @@
 // ignores them, and acceptQuote re-prices whatever they actually submit.
 
 const { tripMinutes } = require('../helpers/datetime.js');
-const { computeQuote } = require('../helpers/pricing.js');
 const { stopsOf } = require('../helpers/stops.js');
 const { minTripHours } = require('./fleetService.js');
 
@@ -256,8 +255,7 @@ async function priceVehicles(quote, vehicles, bases = [], chosenBaseId = null) {
       return {
         ...v,
         ...(minimumNote ? { minimumNote } : {}),
-        // totals ride along so the admin email can list prices without re-pricing
-        candidates: priceRates(v.rates, ctx).map((c) => ({ ...c, total: computeQuote(c).total })),
+        candidates: priceRates(v.rates, ctx),
       };
     }),
   };

@@ -343,11 +343,12 @@ async function sendAdminNewRequest(quote) {
 // the email lists the best fits; the dashboard holds the rest
 const EMAIL_MATCH_LIMIT = 10;
 
-// headline and secondary price for one matched vehicle; hourly rates when the route could not be priced
+// headline and secondary base fare for one matched vehicle, before tolls, tax and gratuity;
+// hourly rates when the route could not be priced
 function matchPrices(m) {
-  const total = (label) => (m.candidates || []).find((c) => c.label === label)?.total;
-  const retail = total('Retail');
-  const affiliate = total('Affiliate');
+  const fare = (label) => (m.candidates || []).find((c) => c.label === label)?.baseFare;
+  const retail = fare('Retail');
+  const affiliate = fare('Affiliate');
   if (retail || affiliate) {
     return {
       main: retail ? money(retail) : 'No retail rate',
@@ -400,7 +401,7 @@ async function sendAdminOpenRequest(quote) {
   const { vehicles = [], error, route } = quote.matching || {};
   const minimumNote = route?.minimumNote || '';
   const summary = vehicles.length
-    ? `${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} fit this trip, smallest first. Prices are full trip totals before any edits.`
+    ? `${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} fit this trip, smallest first. Prices are base fares, before tolls, tax and gratuity.`
     : error ? 'The fleet could not be checked automatically.' : 'No vehicles in the fleet fit this trip.';
 
   await sendMail({
@@ -507,7 +508,7 @@ const paymentMethods = (columns, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
-    <td class="tr-cell" style="${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;">${esc(note)}</span>` : ''}</td>
+    <td class="tr-cell" style="${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;font-weight:700;color:${BRAND.text};">${esc(note)}</span>` : ''}</td>
     ${columns.map((c) => `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">${esc(c.label)}</td>`).join('')}
   </tr>
   ${feeTiers().map((t) => `
@@ -530,37 +531,30 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
   const vehicleName = quote.vehicle?.name || 'A vehicle';
   const depositPct = pct(quoteDepositRate(quote));
   const chooses = !!quote.gratuity?.customerChooses;
-  // prose quotes the card price; the ways-to-pay table lists every method's
-  const cardRate = processingFeeRate('card');
-  const card = quotePrice(quote, cardRate);
-  const total = money(card.total);
-  const deposit = depositAmount ? money(card.deposit.amount) : null;
+  // the method is picked at checkout, so the breakdown and prose are before processing fees; the ways-to-pay table lists each method's
+  const base = quotePrice(quote, 0);
+  const total = money(base.total);
+  const deposit = depositAmount ? money(base.deposit.amount) : null;
   const payColumns = depositAmount
     ? [{ label: 'In full', at: (r) => quotePrice(quote, r).total }, { label: 'Deposit', at: (r) => quotePrice(quote, r).deposit.amount }]
     : [{ label: 'Total', at: (r) => quotePrice(quote, r).total }];
   const payNote = chooses ? 'before gratuity' : '';
-  const totals = {
-    fee: card.fee,
-    feeLabel: `Card processing fee (${pct(cardRate)})`,
-    total: card.total,
-    totalLabel: chooses ? 'Total by card, before gratuity' : 'Total by card',
-  };
+  const totals = { fee: 0, total: base.total, totalLabel: chooses ? 'Total, before gratuity' : 'Total' };
+  const depositLine = `Pay in full today or secure your booking with a ${depositPct} deposit of ${deposit} plus your payment method's processing fee.`;
+  const cardLine = `Pay ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
+    + 'will be automatically charged to the same card on arrival of the vehicle.';
   await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     subject: offer ? 'A vehicle is available for your trip' : 'Your Tour Rider quote is ready',
     text: `Hello ${quote.customer.name},\n\n`
       + (offer
-        ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${total} by card.\n`
-        : `We can cover this trip for ${total} by card.\n`)
+        ? `Good news: the ${vehicleName} is available for your trip on ${quote.date}, at ${total} before processing fees.\n`
+        : `We can cover this trip for ${total} before processing fees.\n`)
       + (chooses ? `${gratuityChoiceText(quote)}\n${GRATUITY_HOW}\n\n` : '')
-      + (depositAmount
-        ? `Pay in full today or secure your booking with a ${depositPct} deposit of ${deposit}.\n\n`
-          + `Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
-          + 'will be automatically charged to the same card on arrival of the vehicle.\n\n'
-        : 'Payment in full confirms your booking.\n\n')
+      + (depositAmount ? `${depositLine}\n\n${cardLine}\n\n` : 'Payment in full confirms your booking.\n\n')
       + `${paymentMethodsText(payColumns, payNote)}\n\n`
-      + `Complete your booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
+      + `Complete booking: ${paymentUrl}\n\nThis link is personal to you and expires in ${ttl} days.`,
     html: shell({
       heading: offer ? 'A vehicle is available' : 'Your quote is ready',
       preheader: offer
@@ -572,17 +566,16 @@ async function sendQuoteAccepted(quote, paymentUrl, depositAmount) {
           ? para('Good news! We’ve secured a vehicle for your trip. If you’re happy with the quoted price, please proceed with completing your booking.')
             + vehicleCard(quote.vehicle)
           : para('Thanks for your request — we can cover this trip.'))
-        + amountPanel(chooses ? 'Total before gratuity' : 'Total', total, 'By card. Every payment method is listed below.')
+        + amountPanel(chooses ? 'Total before gratuity' : 'Total', total, 'Before processing fees. Each payment method’s total is listed below.')
         + invoiceTable(quote, totals)
         + (chooses ? gratuityChoice(quote) : '')
         + detailRows(tripRows(quote))
         + (depositAmount
-          ? para(`Pay in full today or secure your booking with a <strong>${depositPct} deposit of ${deposit}</strong>.`)
-            + para(`Pay your ${depositPct} deposit by card today. The remaining balance, plus the processing fee, `
-              + 'will be automatically charged to the same card on arrival of the vehicle.')
+          ? para(`Pay in full today or secure your booking with a <strong>${depositPct} deposit of ${deposit}</strong> plus your payment method’s processing fee.`)
+            + para(esc(cardLine))
           : para('Payment in full confirms your booking.'))
         + paymentMethods(payColumns, payNote)
-        + button(paymentUrl, 'Complete your booking')
+        + button(paymentUrl, 'Complete booking')
         + para(`<span style="font-size:12px;color:${BRAND.muted};">This link is personal to you and expires in ${esc(ttl)} days. If the button doesn't work, paste this into your browser:<br><span style="word-break:break-all;color:${BRAND.muted};">${esc(paymentUrl)}</span></span>`),
     }),
   });
