@@ -2,7 +2,6 @@ const nodemailer = require('nodemailer');
 const {
   buildItineraryPDF, buildInvoicePDF, buildChargeInvoicePDF, buildCalendarInvite,
 } = require('./itinerary.js');
-const { formatInZone } = require('../helpers/datetime.js');
 const {
   methodLabel, processingFeeRate, balanceDue, balancePlan, bookingTotals, ALL_METHODS, PAYPAL_METHODS,
 } = require('../helpers/paymentMethods.js');
@@ -687,10 +686,6 @@ async function sendPaymentReceipt(quote, amount, isDeposit) {
           refRow(quote),
         ])
         + para(balanceLine(quote, isDeposit))
-        + (quote.squareCardId && quote.cardReleaseAt
-          ? para(`<span style="font-size:13px;color:${BRAND.muted};">Your card is kept on file until `
-            + `${esc(formatInZone(new Date(quote.cardReleaseAt)))} for any damage or cleaning charges, then removed.</span>`)
-          : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">We'll be in touch before pickup with your driver's details.</span>`),
     }),
   });
