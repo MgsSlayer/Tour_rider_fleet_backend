@@ -244,6 +244,20 @@ function buildInvoicePDF(quote, amountPaid, isDeposit) {
     const fee = Number(quote.processingFee || 0);
     const method = METHOD_LABELS[quote.paymentMethod] || null;
     const owes = isDeposit && quote.remainingBalance > 0;
+    // a deposit whose balance has also come in: the closing invoice shows both payments and the total
+    if (quote.paymentOption === 'deposit' && quote.remainingBalancePaid) {
+      const balance = round2(Number(quote.remainingBalance) + (Number(quote.balanceProcessingFee) || 0));
+      const total = round2(Number(quote.amountPaid) || 0);
+      const by = (m) => (METHOD_LABELS[m] ? ` (${METHOD_LABELS[m]})` : '');
+      section('Payment', 16 + 2 * ROW + STRONG_ROW + 22);
+      row(`Deposit paid${by(quote.paymentMethod)}`, money(round2(total - balance)));
+      row(`Balance paid${by(quote.balanceMethod || quote.paymentMethod)}`, money(balance));
+      row('Paid in full', money(total), { strong: true });
+      note('Nothing further is due.', 22);
+      drawFooter(doc, left, right, 'Thank you for choosing Tour Rider.');
+      doc.end();
+      return;
+    }
     // the payment block reads as one, so it moves to the next page whole when it can't fit
     section('Payment', 16 + (fee > 0 ? 2 * ROW : 0) + STRONG_ROW + (method ? 14 : 0) + (owes ? ROW + 22 : 22));
     // a surcharge has to be visible on the receipt, not folded into one figure

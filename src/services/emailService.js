@@ -292,11 +292,14 @@ const gratuityChoice = (q) => `
 const refOf = (q) => q.reservationNumber || String(q._id);
 const refRow = (q) => (q.reservationNumber ? null : ['Reference', String(q._id)]);
 
+// the pickup as the customer booked it, in the fleet's own time, never the server's
+const pickupWhen = (q) => `${q.date} at ${q.pickupTime}`;
+
 // an open request has no vehicle row until the admin picks one
 const tripRows = (q) => [
   q.reservationNumber ? ['Reservation', q.reservationNumber] : null,
   q.vehicle ? ['Vehicle', q.vehicle.name || q.vehicle.type || 'Selected vehicle'] : null,
-  ['Date', `${q.date} at ${q.pickupTime}`],
+  ['Date', pickupWhen(q)],
   ['Pick-up', q.pickupAddress],
   ...stopRows(q),
   ['Drop-off', q.dropoffAddress],
@@ -723,7 +726,7 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
     subject: `Booking confirmed — ${c.name}`,
     text: `${c.name} has paid ${money(amount)}${isDeposit ? ` (deposit; ${balance.charAt(0).toLowerCase()}${balance.slice(1)})` : ' in full'}.\n`
       + `Contact: ${c.phone ? `${c.phone} / ` : ''}${c.email}\n`
-      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Pickup: ${pickupWhen(quote)}\n`
       + `Attached: Itinerary with no pricing, customer's invoice and a calendar invite.`,
     html: shell({
       heading: 'Booking confirmed',
@@ -746,36 +749,51 @@ async function sendAdminBookingConfirmed(quote, amount, isDeposit) {
   });
 }
 
+// the closing receipt once the balance is in, whether by the card on file, a link or Zelle
 async function sendBalanceCharged(quote) {
   const fee = Number(quote.balanceProcessingFee) || 0;
-  const charged = money(round2(Number(quote.remainingBalance) + fee));
+  const balance = round2(Number(quote.remainingBalance) + fee);
+  // amountPaid is everything taken: the deposit with its fee, then the balance with its own
+  const total = round2(Number(quote.amountPaid) || 0);
+  const deposit = round2(total - balance);
   // a saved card is charged on arrival; anything else came in through a link or by Zelle
   const onFile = !!quote.squareCardId;
   const how = onFile ? 'charged to the card on file' : `paid by ${methodLabel(quote.balanceMethod)}`;
+  const paidRows = [
+    ['Deposit paid', `${money(deposit)} · ${methodName(quote.paymentMethod)}`],
+    ['Balance paid', `${money(balance)} · ${methodName(quote.balanceMethod || quote.paymentMethod)}`],
+    ['Total paid', money(total)],
+  ];
+  const attachments = (await Promise.all([
+    attach('invoice PDF', `invoice-${quote._id}.pdf`, 'application/pdf', () => buildInvoicePDF(quote, total, false)),
+  ])).filter(Boolean);
+
   // admins are bcc'd so their addresses never appear in the customer's copy
   await sendMail({
     from: FROM(),
     to: [quote.customer.email],
     bcc: adminRecipients(),
-    subject: onFile ? 'Your remaining balance has been charged' : 'Your remaining balance is paid',
-    text: `Hello ${quote.customer.name},\n\nYour remaining balance of ${charged} `
-      + `has been ${how}.\nPickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
-      + `\nReference: ${refOf(quote)}`,
+    attachments,
+    subject: 'Paid in full — your Tour Rider receipt',
+    text: `Hello ${quote.customer.name},\n\nYour remaining balance of ${money(balance)} has been ${how}. Your trip is now paid in full.\n\n`
+      + `${paidRows.map(([k, v]) => `${k}: ${v}`).join('\n')}\n\n`
+      + `Reservation: ${refOf(quote)}\nYour final invoice is attached.`,
     html: shell({
-      heading: onFile ? 'Balance charged' : 'Balance paid',
+      heading: 'Paid in full',
       accent: BRAND.good,
-      preheader: `${charged} ${how}`,
+      preheader: `${money(balance)} ${how}, your trip is paid in full`,
       body:
         para(`Hello ${esc(quote.customer.name)},`)
-        + para(`Your remaining balance has been ${esc(how)} — your trip is now paid in full.`)
-        + amountPanel(onFile ? 'Balance charged' : 'Balance paid', charged,
-          fee ? `Includes ${money(fee)} processing fee · paid in full` : 'Paid in full')
+        + para(`Your remaining balance of ${money(balance)} has been ${esc(how)}. Your trip is now paid in full.`)
+        + amountPanel('Paid in full', money(total), 'Nothing further is due')
+        + invoiceTable(quote, paidTotals(quote))
         + detailRows([
           ...tripRows(quote),
-          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
+          ...paidRows,
+          quote.gratuity?.method ? ['Gratuity', gratuityLabel(quote.gratuity)] : null,
           refRow(quote),
         ])
-        + para(`<span style="font-size:13px;color:${BRAND.muted};">Have a great trip — your driver will be in touch shortly.</span>`),
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">Your final invoice is attached. Thank you for choosing Tour Rider.</span>`),
     }),
   });
 }
@@ -794,7 +812,7 @@ async function sendBalanceChargeFailed(quote, reason) {
     text: `The remaining balance of ${attempted} for ${c.name} could not be charged.\n`
       + `Reason: ${reason}\n`
       + `Customer: ${c.email}${c.phone ? ` / ${c.phone}` : ''}\n`
-      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Pickup: ${pickupWhen(quote)}\n`
       + `Reference: ${refOf(quote)}\n\n`
       + `The card on file was NOT charged. Contact the customer or retry from the dashboard.`,
     html: shell({
@@ -814,7 +832,6 @@ async function sendBalanceChargeFailed(quote, reason) {
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
           ...tripRows(quote),
-          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
           ['Already paid', money(quote.amountPaid)],
           refRow(quote),
         ])
@@ -866,7 +883,7 @@ async function sendAdminBalanceLinkSent(quote) {
     subject: `Balance link sent to ${c.name} — ${outstanding} outstanding`,
     text: `${c.name} paid their deposit by ${quote.paymentMethod || 'an uncharged method'}, so there is no card on file.\n`
       + `A payment link for ${outstanding} has been emailed to ${c.email}.\n`
-      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Pickup: ${pickupWhen(quote)}\n`
       + `Reference: ${refOf(quote)}\n\n`
       + `Check it has been paid before the vehicle leaves.`,
     html: shell({
@@ -880,7 +897,6 @@ async function sendAdminBalanceLinkSent(quote) {
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
           ...tripRows(quote),
-          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
           ['Already paid', money(quote.amountPaid)],
           refRow(quote),
         ])
@@ -1041,7 +1057,7 @@ async function sendAdminOfflineChosen(quote, amount, method) {
     text: `${c.name} chose to pay by ${label}.\n`
       + `Expecting ${money(amount)}.\n`
       + `Customer: ${c.email}${c.phone ? ` / ${c.phone}` : ''}\n`
-      + `Pickup: ${new Date(quote.pickupDateTime).toLocaleString()}\n`
+      + `Pickup: ${pickupWhen(quote)}\n`
       + `Reference: ${refOf(quote)}\n\n`
       + `Nothing has been charged. Mark it paid on the dashboard once the money lands.`,
     html: shell({
@@ -1055,7 +1071,6 @@ async function sendAdminOfflineChosen(quote, amount, method) {
           ['Customer', c.email],
           c.phone ? ['Phone', c.phone] : null,
           ...tripRows(quote),
-          ['Pickup', new Date(quote.pickupDateTime).toLocaleString()],
           refRow(quote),
         ])
         + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : ''),
