@@ -197,7 +197,7 @@ const para = (html) => `<p style="margin:0 0 14px;font-size:15px;line-height:1.6
 // the headline number — quote total, amount charged, etc.
 const amountPanel = (label, value, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#fffaf0;border:1px solid rgba(245,166,35,.45);border-radius:10px;margin:0 0 22px;">
+       style="width:100%;background:#fffaf0;border:1px solid rgba(245,166,35,.45);border-radius:10px;margin:0 0 22px;">
   <tr><td align="center" class="tr-cell" style="padding:20px 16px;font-family:${FONT};">
     <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:${BRAND.muted};">${esc(label)}</div>
     <div style="font-size:32px;font-weight:700;color:${BRAND.ink};padding-top:4px;">${esc(value)}</div>
@@ -207,7 +207,7 @@ const amountPanel = (label, value, note = '') => `
 
 const detailRows = (rows) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${rows.filter(Boolean).map(([k, v], i) => `
   <tr>
     <td class="tr-cell" style="padding:11px 16px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;
@@ -246,7 +246,7 @@ const invoiceTable = (q, totals) => {
 
   return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${row('Base fare', money(q.baseFare))}
   ${lines.map((l) => row(l.label, money(l.amount), { top: true })).join('')}
   ${totals.fee ? row(totals.feeLabel, money(totals.fee), { top: true }) : ''}
@@ -270,7 +270,7 @@ const gratuityChoiceText = (q) => 'Gratuity (your choice at checkout):\n'
 
 const gratuityChoice = (q) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
     <td class="tr-cell" style="${TABLE_HEAD}">Gratuity<br><span style="text-transform:none;letter-spacing:0;">your choice at checkout</span></td>
     <td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">Amount</td>
@@ -301,7 +301,7 @@ const tripRows = (q) => [
 // the customer's free-text note, set apart from the trip details
 const messageBlock = (message) => (message
   ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-            style="background:#fafafa;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 20px;">
+            style="width:100%;background:#fafafa;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 20px;">
        <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
          <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                       color:${BRAND.muted};padding-bottom:5px;">Message</span>${esc(message)}
@@ -368,7 +368,7 @@ const ownMinimum = (m, tripNote) => (m.minimumNote && m.minimumNote !== tripNote
 
 const matchTable = (vehicles, tripNote) => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;">
   ${vehicles.slice(0, EMAIL_MATCH_LIMIT).map((m, i) => {
     const p = matchPrices(m);
     const top = i ? `border-top:1px solid ${BRAND.line};` : '';
@@ -449,7 +449,7 @@ const vehicleCard = (v = {}) => {
   const more = site() && v.sn ? `${site()}/vehicle.html?sn=${encodeURIComponent(v.sn)}` : '';
   return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;overflow:hidden;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 22px;overflow:hidden;">
   ${photo ? `<tr><td style="font-size:0;line-height:0;"><img src="${esc(photo)}" alt="${esc(v.name)}" width="536"
        style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:10px 10px 0 0;"></td></tr>` : ''}
   <tr><td class="tr-cell" style="padding:14px 16px;font-family:${FONT};">
@@ -505,7 +505,7 @@ const paymentMethodsText = (columns, note = '') => `Ways to pay${note ? ` (${not
 
 const paymentMethods = (columns, note = '') => `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
+       style="width:100%;border:1px solid ${BRAND.line};border-radius:10px;margin:0 0 10px;">
   <tr>
     <td class="tr-cell" style="${TABLE_HEAD}">Ways to pay${note ? `<br><span style="text-transform:none;letter-spacing:0;font-weight:700;color:${BRAND.text};">${esc(note)}</span>` : ''}</td>
     ${columns.map((c) => `<td align="right" class="tr-cell" style="${TABLE_HEAD}white-space:nowrap;">${esc(c.label)}</td>`).join('')}
@@ -597,7 +597,7 @@ async function sendQuoteDeclined(quote) {
         + para("Thank you for considering Tour Rider. Unfortunately we're unable to fulfil this request.")
         + (quote.declineReason
           ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                    style="background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
+                    style="width:100%;background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
                <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
                  <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                               color:${BRAND.muted};padding-bottom:5px;">Reason</span>${esc(quote.declineReason)}
@@ -800,7 +800,7 @@ async function sendBalanceChargeFailed(quote, reason) {
         para(`The remaining balance for <strong>${esc(c.name)}</strong> could not be charged to the card on file.`)
         + amountPanel('Uncollected', attempted, 'The card was not charged')
         + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-                  style="background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
+                  style="width:100%;background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
              <tr><td class="tr-cell" style="padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
                <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
                             color:${BRAND.muted};padding-bottom:5px;">Reason given by Square</span>${esc(reason)}

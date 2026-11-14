@@ -21,8 +21,8 @@ const GOLD = '#c9992a';
 const MUTED = '#6b7280';
 const LINE = '#e5e7eb';
 
-// bundled rather than fetched, so building a PDF never depends on the network
-const LOGO_PATH = path.join(__dirname, '../../../frontend/css/logo_tour_ride-removebg-preview-1-3-300x175.png');
+// bundled with the backend rather than fetched, so building a PDF never depends on the network or the frontend
+const LOGO_PATH = path.join(__dirname, '../assets/logo.png');
 let logoBuffer;
 function logo() {
   if (logoBuffer === undefined) {
