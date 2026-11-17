@@ -17,4 +17,13 @@ const quoteLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-module.exports = { loginLimiter, quoteLimiter };
+// vehicle owners answering their availability link; generous, it only stops hammering
+const availabilityLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests from this IP, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = { loginLimiter, quoteLimiter, availabilityLimiter };

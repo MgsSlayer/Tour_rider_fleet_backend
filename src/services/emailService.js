@@ -9,7 +9,8 @@ const { quoteDepositRate } = require('../helpers/tokens.js');
 const { round2, priceBooking } = require('../helpers/pricing.js');
 const { isConfigured: paypalConfigured } = require('../config/paypal.js');
 const { wantsLabel } = require('./fleetService.js');
-const { stopRows } = require('../helpers/stops.js');
+const { stopRows, stopsOf } = require('../helpers/stops.js');
+const { areaOf } = require('../helpers/area.js');
 const { gratuityOptions, gratuityLabel } = require('../helpers/gratuity.js');
 
 // USE_RESEND=true sends everything through Resend and leaves SMTP idle; anything else keeps SMTP
@@ -316,16 +317,21 @@ const messageBlock = (message) => (message
        </td>${FILL_PARTNER}</tr></table>`
   : '');
 
-async function sendAdminNewRequest(quote) {
+// `ownerConfirmed` when this follows the vehicle owner saying yes, rather than arriving straight from the form;
+// `ownerNote` says why the owner couldn't be asked, such as no email for them in the sheet
+async function sendAdminNewRequest(quote, { ownerConfirmed = false, ownerNote = '' } = {}) {
   const to = adminRecipients();
   if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
 
   const c = quote.customer;
+  const confirmed = ownerConfirmed ? "The vehicle owner has confirmed they're available." : '';
   await sendMail({
     from: FROM(),
     to,
-    subject: `New quote request — ${c.name}`,
+    subject: `New quote request — ${c.name}${ownerConfirmed ? ' (owner available)' : ''}`,
     text: `New quote request from ${c.name} (${c.email}${c.phone ? `, ${c.phone}` : ''})\n`
+      + (confirmed ? `${confirmed}\n` : '')
+      + (ownerNote ? `Owner not asked: ${ownerNote}\n` : '')
       + `${quote.vehicle?.name || ''} · ${quote.date} ${quote.pickupTime}\n`
       + `${quote.pickupAddress} -> ${quote.dropoffAddress} · ${quote.passengers} passengers\n`
       + `Review it on the admin dashboard to accept with a price or decline.`,
@@ -333,7 +339,15 @@ async function sendAdminNewRequest(quote) {
       heading: 'New quote request',
       preheader: `${c.name} — ${quote.vehicle?.name || 'vehicle'} on ${quote.date}`,
       body:
-        para(`<strong>${esc(c.name)}</strong> has requested a quote.`)
+        para(`<strong>${esc(c.name)}</strong> has requested a quote.${confirmed ? ` <strong>${esc(confirmed)}</strong>` : ''}`)
+        + (ownerNote
+          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                    style="width:100%;background:#fffaf0;border-left:3px solid ${BRAND.gold};border-radius:6px;margin:0 0 22px;">
+               <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+                 <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                              color:${BRAND.muted};padding-bottom:5px;">Owner not asked</span>${esc(ownerNote)}
+               </td>${FILL_PARTNER}</tr></table>`
+          : '')
         + detailRows([
           ['Email', c.email],
           c.phone ? ['Phone', c.phone] : null,
@@ -343,6 +357,128 @@ async function sendAdminNewRequest(quote) {
         + messageBlock(quote.message)
         + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : '')
         + para(`<span style="font-size:13px;color:${BRAND.muted};">Accept it with a price, or decline with a reason — the customer is emailed either way.</span>`),
+    }),
+  });
+}
+
+const TRIP_TYPES = { roundtrip: 'Round trip', 'one-way': 'One way', shuttle: 'Shuttle' };
+
+// the trip as the vehicle owner sees it: enough to judge availability, nothing about the customer or the price
+const ownerTripRows = (q) => {
+  const stops = stopsOf(q).length;
+  return [
+    ['Vehicle', `${q.vehicle?.name || 'Vehicle'}${q.vehicle?.sn ? ` · S/N ${q.vehicle.sn}` : ''}`],
+    ['Date', q.date],
+    ['Time', q.finalDropoffTime ? `${q.pickupTime} to ${q.finalDropoffTime}` : `${q.pickupTime} pick-up`],
+    ['Trip type', TRIP_TYPES[q.tripType] || q.tripType],
+    ['Passengers', q.passengers],
+    ['Pick-up area', areaOf(q.pickupAddress)],
+    stops ? ['Stop-overs', stops] : null,
+    ['Drop-off area', areaOf(q.dropoffAddress)],
+    q.reservationNumber ? ['Reference', q.reservationNumber] : null,
+  ];
+};
+
+/** Asks the vehicle's owner whether they and the vehicle are free; `url` opens the accept or decline page. */
+async function sendOwnerAvailabilityRequest(quote, url) {
+  const name = quote.vehicle?.name || 'your vehicle';
+  await sendMail({
+    from: FROM(),
+    to: [quote.affiliate.email],
+    subject: `Are you available? ${name} on ${quote.date}`,
+    text: `Hello,\n\nA customer has requested your ${name}${quote.vehicle?.sn ? ` (S/N ${quote.vehicle.sn})` : ''} through Tour Rider `
+      + `for ${quote.date}, ${quote.finalDropoffTime ? `${quote.pickupTime} to ${quote.finalDropoffTime}` : `pick-up at ${quote.pickupTime}`}.\n\n`
+      + `Please let us know whether you and this vehicle are available:\n${url}\n\nNo login is needed. Thank you,\nTour Rider`,
+    html: shell({
+      heading: 'Are you available?',
+      preheader: `${name} requested for ${quote.date}`,
+      body:
+        para('Hello,')
+        + para(`A customer has requested your <strong>${esc(name)}</strong> through Tour Rider. `
+          + 'Please let us know whether you and this vehicle are available for this trip.')
+        + detailRows(ownerTripRows(quote))
+        + button(url, 'Accept or decline')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">No login is needed. This link is for this request only.</span>`),
+    }),
+  });
+}
+
+/** Tells the admin a request is in, and that the owner has been asked and hasn't answered yet. */
+async function sendAdminAwaitingOwner(quote) {
+  const to = adminRecipients();
+  if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
+
+  const c = quote.customer;
+  const name = quote.vehicle?.name || 'a vehicle';
+  await sendMail({
+    from: FROM(),
+    to,
+    subject: `New ride request — waiting for the owner — ${c.name}`,
+    text: `${c.name} (${c.email}${c.phone ? `, ${c.phone}` : ''}) has requested the ${name} for ${quote.date} at ${quote.pickupTime}.\n`
+      + `The vehicle owner (${quote.affiliate.email}) has been asked to confirm they're available and hasn't responded yet.\n`
+      + "You'll get the request to price once they accept. You can also price it on the dashboard now.",
+    html: shell({
+      heading: 'Waiting for the owner',
+      preheader: `${c.name} — ${name} on ${quote.date}, owner not yet confirmed`,
+      body:
+        para(`<strong>${esc(c.name)}</strong> has requested the <strong>${esc(name)}</strong>. `
+          + "The vehicle owner has been asked to confirm they're available and hasn't responded yet.")
+        + detailRows([
+          ['Email', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ...tripRows(quote),
+          ['Trip type', quote.tripType],
+          ['Owner', quote.affiliate.email],
+        ])
+        + messageBlock(quote.message)
+        + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : '')
+        + para(`<span style="font-size:13px;color:${BRAND.muted};">You'll get the request to price once the owner accepts. You can also price and send it from the dashboard now.</span>`),
+    }),
+  });
+}
+
+/** The owner's answer when it isn't simply the request to price: a decline, or a yes after the admin has already acted. */
+async function sendAdminOwnerResponse(quote) {
+  const to = adminRecipients();
+  if (!to.length) return console.warn('ADMIN_EMAIL not set; skipping admin notification');
+
+  const c = quote.customer;
+  const name = quote.vehicle?.name || 'the vehicle';
+  const declined = quote.affiliate.status === 'declined';
+  const reason = quote.affiliate.declineReason;
+  const intro = declined
+    ? `The owner of the ${name} isn't available for ${c.name}'s trip on ${quote.date}.`
+    : `The owner of the ${name} has confirmed they're available for ${c.name}'s trip on ${quote.date}. You've already responded to this request.`;
+  await sendMail({
+    from: FROM(),
+    to,
+    subject: `Owner ${declined ? 'not available' : 'available'} — ${name} for ${c.name} on ${quote.date}`,
+    text: `${intro}\n${reason ? `Reason given: ${reason}\n` : ''}`
+      + (declined ? 'Decline the request on the dashboard, or arrange another vehicle with the customer.' : ''),
+    html: shell({
+      heading: declined ? 'Owner not available' : 'Owner available',
+      accent: declined ? BRAND.bad : BRAND.good,
+      preheader: intro,
+      body:
+        para(esc(intro))
+        + (reason
+          ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                    style="width:100%;background:#fef3f2;border-left:3px solid ${BRAND.bad};border-radius:6px;margin:0 0 22px;">
+               <tr><td width="100%" class="tr-cell" style="width:100%;padding:14px 16px;font-size:14px;line-height:1.6;color:${BRAND.text};font-family:${FONT};">
+                 <span style="display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                              color:${BRAND.muted};padding-bottom:5px;">Reason given</span>${esc(reason)}
+               </td>${FILL_PARTNER}</tr></table>`
+          : '')
+        + detailRows([
+          ['Customer', c.email],
+          c.phone ? ['Phone', c.phone] : null,
+          ...tripRows(quote),
+          ['Owner', quote.affiliate.email],
+        ])
+        + (site() ? button(`${site()}/admin.html`, 'Open the dashboard') : '')
+        + (declined
+          ? para(`<span style="font-size:13px;color:${BRAND.muted};">Decline the request on the dashboard, or arrange another vehicle with the customer.</span>`)
+          : ''),
     }),
   });
 }
@@ -1081,6 +1217,9 @@ async function sendAdminOfflineChosen(quote, amount, method) {
 module.exports = {
   useResend,
   sendAdminNewRequest,
+  sendOwnerAvailabilityRequest,
+  sendAdminAwaitingOwner,
+  sendAdminOwnerResponse,
   sendAdminOpenRequest,
   sendAdminBookingConfirmed,
   sendBalanceChargeFailed,

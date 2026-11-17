@@ -10,7 +10,7 @@ const {
   ALL_METHODS, processingFeeRate, balanceDue, bookingTotals,
 } = require('../helpers/paymentMethods.js');
 const {
-  fetchFleet, matchFleet, minTripHours, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
+  fetchFleet, matchFleet, minTripHours, vehicleOwnerEmail, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
 } = require('../services/fleetService.js');
 const { MAX_STOPS, stopsOf } = require('../helpers/stops.js');
 const { DEFAULT_GRATUITY_PERCENT, gratuityOptions } = require('../helpers/gratuity.js');
@@ -176,7 +176,7 @@ const createQuote = async (req, res) => {
     const quote = await Quote.create({ vehicle, ...tripRecord(readTrip(b), { minHours: minTripHours(vehicle) }) });
 
     // a failed notification must not lose the customer's request
-    email.sendAdminNewRequest(quote).catch((e) => console.error('admin notify failed:', e.message));
+    notifyNewRequest(quote).catch((e) => console.error('admin notify failed:', e.message));
 
     return res.status(201).json({ success: true, id: quote._id });
   } catch (err) {
@@ -217,6 +217,45 @@ async function refreshMatches(quote, wantedBase = null) {
   quote.matching = matching;
   await quote.save();
   return quote.toObject().matching;
+}
+
+/**
+ * A vehicle whose owner has an email in the sheet: the owner is asked whether they're available,
+ * and the admin is told the owner hasn't answered yet. The usual request to price follows once
+ * they accept. With no owner email, or if anything on that path fails, the admin gets the
+ * request straight away, with a note of why the owner wasn't asked.
+ */
+async function notifyNewRequest(quote) {
+  const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+  const sn = quote.vehicle?.sn;
+  // the admin email's "Owner not asked" box carries why
+  const notAsked = (why) => email.sendAdminNewRequest(quote, { ownerNote: why });
+  if (!base) return notAsked("PUBLIC_URL isn't set, so there's no page to send the owner to.");
+
+  let owner;
+  try {
+    owner = await vehicleOwnerEmail(sn);
+  } catch (e) {
+    console.error('owner lookup failed, notifying the admin directly:', e.message);
+    return notAsked("The fleet sheet couldn't be read.");
+  }
+  if (!owner) return notAsked("An email couldn't be found for the vehicle owner.");
+
+  const raw = newToken();
+  quote.affiliate = {
+    email: owner, tokenHash: hashToken(raw), tokenExpires: quote.pickupDateTime, status: 'pending', requestedAt: new Date(),
+  };
+  await quote.save();
+  try {
+    await email.sendOwnerAvailabilityRequest(quote, `${base}/availability.html?token=${raw}`);
+  } catch (e) {
+    // an owner who was never asked can't answer, so the admin takes it from here
+    console.error('owner email failed, notifying the admin directly:', e.message);
+    quote.affiliate = undefined;
+    await quote.save();
+    return notAsked(`The email to the owner (${owner}) couldn't be sent.`);
+  }
+  return email.sendAdminAwaitingOwner(quote);
 }
 
 // the customer's answer must not wait on the sheet and route lookups

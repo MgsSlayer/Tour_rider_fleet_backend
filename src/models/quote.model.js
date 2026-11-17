@@ -109,6 +109,18 @@ const quoteSchema = new mongoose.Schema({
     index: true,
   },
 
+  // the vehicle owner's answer to "are you available?", asked by email when the sheet has their address.
+  // It never blocks the admin, who can price the request whether or not the owner has replied.
+  affiliate: {
+    email: String,
+    tokenHash: { type: String, index: true },
+    tokenExpires: Date,
+    status: { type: String, enum: ['pending', 'accepted', 'declined'] },
+    requestedAt: Date,
+    respondedAt: Date,
+    declineReason: String,
+  },
+
   // cached price suggestion — computed once per quote so opening the dashboard
   // doesn't re-bill Google's Routes API on every page load
   suggestion: {

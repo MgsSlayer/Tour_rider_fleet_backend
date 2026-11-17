@@ -25,7 +25,8 @@ async function fetchFleet() {
   const key = process.env.SHEETS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   if (!id || !key) throw new Error('The fleet sheet is not configured. Set SHEET_ID and SHEETS_API_KEY.');
 
-  const range = encodeURIComponent(`${process.env.SHEET_NAME || 'Fleetsheet'}!A:L`);
+  // column M holds owner emails; the public site reads only A:L, so they never reach a browser
+  const range = encodeURIComponent(`${process.env.SHEET_NAME || 'Fleetsheet'}!A:M`);
   const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${range}?key=${key}`);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`Could not read the fleet sheet: ${data.error?.message || `HTTP ${res.status}`}`);
@@ -99,11 +100,23 @@ function matchFleet(fleet, { passengers, wants }) {
     }));
 }
 
+// whatever the owner email column is headed, it is one of these once normalised
+const OWNER_EMAIL_HEADERS = ['owneremail', 'driveremail', 'affiliateemail', 'email', 'contactemail'];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** The address that owns a vehicle (by S/N), or null when the sheet has none for it. */
+async function vehicleOwnerEmail(sn) {
+  if (!sn) return null;
+  const row = (await fetchFleet()).find((v) => v.sn === String(sn));
+  const email = String(OWNER_EMAIL_HEADERS.map((h) => row?.[h]).find(Boolean) || '').trim();
+  return EMAIL_RE.test(email) ? email : null;
+}
+
 const wantsLabel = (wants = {}) => [
   wants.category === 'any' ? 'Any vehicle' : CATEGORIES.find((c) => c.id === wants.category)?.label,
   CITIES.find((c) => c.id === wants.city)?.label,
 ].filter(Boolean).join(' · ');
 
 module.exports = {
-  fetchFleet, matchFleet, wantsLabel, minTripHours, vehicleTypeLabel, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
+  fetchFleet, matchFleet, wantsLabel, minTripHours, vehicleTypeLabel, vehicleOwnerEmail, MIN_TRIP_HOURS, VEHICLE_CATEGORIES, CITY_IDS,
 };
